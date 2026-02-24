@@ -226,7 +226,6 @@ class PublisherView: ExpoView {
       Task {
         do {
           try await mixer.attachVideo(camera)
-          await mixer.setVideoOrientation(.portrait)
         } catch {
           print("[ExpoLiveStream] Switch camera error: \(error)")
         }

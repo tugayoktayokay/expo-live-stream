@@ -229,6 +229,11 @@ class PublisherView(
         isStreaming = true
         onStreamStateChanged(mapOf("state" to "connecting"))
         camera.startStream(fullUrl)
+        // Restore mute state after stream start (prepareAudio resets encoder)
+        if (isMuted) {
+          camera.disableAudio()
+          Log.d(TAG, "Restored mute state after stream start")
+        }
       } catch (e: Exception) {
         Log.e(TAG, "startStream failed", e)
         isStreaming = false
