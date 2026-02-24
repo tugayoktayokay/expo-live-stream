@@ -261,19 +261,12 @@ class PublisherView: ExpoView {
 
   func toggleMute() {
     isMuted = !isMuted
-    if let mixer = mixer {
+    if let stream = stream {
       Task {
-        do {
-          if isMuted {
-            try await mixer.attachAudio(nil)
-          } else {
-            let mic = AVCaptureDevice.default(for: .audio)
-            try await mixer.attachAudio(mic)
-          }
-          print("[ExpoLiveStream] Muted: \(isMuted)")
-        } catch {
-          print("[ExpoLiveStream] Mute toggle error: \(error)")
-        }
+        var audioSettings = await stream.audioSettings
+        audioSettings.muted = isMuted
+        await stream.setAudioSettings(audioSettings)
+        print("[ExpoLiveStream] Muted: \(isMuted)")
       }
     }
   }
