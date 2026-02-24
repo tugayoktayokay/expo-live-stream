@@ -82,7 +82,7 @@ class PublisherView: ExpoView {
 
     let session = AVAudioSession.sharedInstance()
     do {
-      try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth])
+      try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
       try session.setActive(true)
     } catch {
       print("[ExpoLiveStream] Audio session error: \(error)")
@@ -171,8 +171,8 @@ class PublisherView: ExpoView {
         await stream?.setAudioSettings(audioSettings)
         await mixer?.setFrameRate(videoFps)
 
-        try await connection?.connect(connectUrl)
-        try await stream?.publish(publishKey)
+        _ = try await connection?.connect(connectUrl)
+        _ = try await stream?.publish(publishKey)
         await MainActor.run {
           self.onConnectionSuccess([:])
           self.onStreamStateChanged(["state": "streaming"])
@@ -194,8 +194,8 @@ class PublisherView: ExpoView {
     stopBitrateTimer()
 
     Task {
-      try? await stream?.close()
-      try? await connection?.close()
+      _ = try? await stream?.close()
+      _ = try? await connection?.close()
       await MainActor.run {
         self.onDisconnect([:])
         self.onStreamStateChanged(["state": "stopped"])
@@ -260,11 +260,11 @@ class PublisherView: ExpoView {
 
   func toggleMute() {
     isMuted = !isMuted
-    if let stream = stream {
+    if let mixer = mixer {
       Task {
-        var audioSettings = await stream.audioSettings
-        audioSettings.muted = isMuted
-        await stream.setAudioSettings(audioSettings)
+        var settings = await mixer.audioMixerSettings
+        settings.isMuted = isMuted
+        await mixer.setAudioMixerSettings(settings)
         print("[ExpoLiveStream] Muted: \(isMuted)")
       }
     }
@@ -275,8 +275,12 @@ class PublisherView: ExpoView {
     bitrateTimer?.invalidate()
     bitrateTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
       guard let self = self, let stream = self.stream else { return }
-      let bytesPerSecond = stream.info.currentBytesPerSecond
-      self.onBitrateUpdate(["bitrate": bytesPerSecond * 8])
+      Task {
+        let bytesPerSecond = stream.info.currentBytesPerSecond
+        await MainActor.run {
+          self.onBitrateUpdate(["bitrate": bytesPerSecond * 8])
+        }
+      }
     }
   }
 
@@ -303,8 +307,8 @@ class PublisherView: ExpoView {
       let stream = self.stream
       let connection = self.connection
       Task {
-        try? await stream?.close()
-        try? await connection?.close()
+        _ = try? await stream?.close()
+        _ = try? await connection?.close()
       }
     }
   }
