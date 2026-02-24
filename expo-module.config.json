@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["ExpoLiveStreamModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.livestream.ExpoLiveStreamModule"]
+  }
+}

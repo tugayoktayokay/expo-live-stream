@@ -1,0 +1,55 @@
+{
+  "name": "expo-live-stream",
+  "version": "1.0.0",
+  "description": "RTMP live stream publisher & player for React Native (Expo). Uses HaishinKit (iOS) and RootEncoder + ExoPlayer (Android).",
+  "main": "build/index.js",
+  "types": "build/index.d.ts",
+  "scripts": {
+    "build": "expo-module build",
+    "clean": "expo-module clean",
+    "lint": "expo-module lint",
+    "test": "expo-module test",
+    "prepare": "expo-module prepare",
+    "prepublishOnly": "expo-module prepublishOnly",
+    "expo-module": "expo-module"
+  },
+  "keywords": [
+    "react-native",
+    "expo",
+    "rtmp",
+    "live-stream",
+    "publisher",
+    "player",
+    "haishinkit",
+    "rootencoder",
+    "exoplayer",
+    "camera",
+    "streaming"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tugayoktayokay/expo-live-stream"
+  },
+  "bugs": {
+    "url": "https://github.com/tugayoktayokay/expo-live-stream/issues"
+  },
+  "homepage": "https://github.com/tugayoktayokay/expo-live-stream#readme",
+  "author": "tugayoktayokay",
+  "license": "MIT",
+  "files": [
+    "build",
+    "src",
+    "ios",
+    "android",
+    "expo-module.config.json"
+  ],
+  "dependencies": {},
+  "devDependencies": {
+    "expo-module-scripts": "^4.1.9"
+  },
+  "peerDependencies": {
+    "expo": "*",
+    "react": "*",
+    "react-native": "*"
+  }
+}
