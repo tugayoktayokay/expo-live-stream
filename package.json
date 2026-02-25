@@ -1,6 +1,6 @@
 {
   "name": "expo-live-stream",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "RTMP live stream publisher & player for React Native (Expo). Uses HaishinKit (iOS) and RootEncoder + ExoPlayer (Android).",
   "main": "build/index.js",
   "types": "build/index.d.ts",
