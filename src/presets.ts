@@ -1,15 +1,15 @@
 // ─── Video Quality Presets ───────────────────────────────────
 
 export enum VideoQuality {
-    /** 426×240, 400kbps — minimum bandwidth */
+    /** 240×426, 400kbps — minimum bandwidth */
     LOW_240P = '240p',
-    /** 640×360, 800kbps — low quality */
+    /** 360×640, 800kbps — low quality */
     LOW_360P = '360p',
-    /** 854×480, 1.2Mbps — standard definition */
+    /** 480×854, 1.2Mbps — standard definition */
     SD_480P = '480p',
-    /** 1280×720, 2Mbps — HD (recommended) */
+    /** 720×1280, 2Mbps — HD (recommended) */
     HD_720P = '720p',
-    /** 1920×1080, 4Mbps — Full HD */
+    /** 1080×1920, 4Mbps — Full HD */
     FHD_1080P = '1080p',
 }
 
@@ -24,40 +24,40 @@ export interface QualityConfig {
 
 export const QualityPresets: Record<VideoQuality, QualityConfig> = {
     [VideoQuality.LOW_240P]: {
-        videoWidth: 426,
-        videoHeight: 240,
+        videoWidth: 240,
+        videoHeight: 426,
         videoBitrate: 400_000,
         videoFps: 24,
         audioBitrate: 64_000,
         audioSampleRate: 44100,
     },
     [VideoQuality.LOW_360P]: {
-        videoWidth: 640,
-        videoHeight: 360,
+        videoWidth: 360,
+        videoHeight: 640,
         videoBitrate: 800_000,
         videoFps: 24,
         audioBitrate: 96_000,
         audioSampleRate: 44100,
     },
     [VideoQuality.SD_480P]: {
-        videoWidth: 854,
-        videoHeight: 480,
+        videoWidth: 480,
+        videoHeight: 854,
         videoBitrate: 1_200_000,
         videoFps: 30,
         audioBitrate: 128_000,
         audioSampleRate: 44100,
     },
     [VideoQuality.HD_720P]: {
-        videoWidth: 1280,
-        videoHeight: 720,
+        videoWidth: 720,
+        videoHeight: 1280,
         videoBitrate: 2_000_000,
         videoFps: 30,
         audioBitrate: 128_000,
         audioSampleRate: 44100,
     },
     [VideoQuality.FHD_1080P]: {
-        videoWidth: 1920,
-        videoHeight: 1080,
+        videoWidth: 1080,
+        videoHeight: 1920,
         videoBitrate: 4_000_000,
         videoFps: 30,
         audioBitrate: 192_000,

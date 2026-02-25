@@ -43,8 +43,8 @@
     "android",
     "expo-module.config.json"
   ],
-  "dependencies": {},
   "devDependencies": {
+    "@types/react": "^19.2.14",
     "expo-module-scripts": "^4.1.9"
   },
   "peerDependencies": {

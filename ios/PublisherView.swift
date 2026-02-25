@@ -1,6 +1,7 @@
 import ExpoModulesCore
 import AVFoundation
 import HaishinKit
+import VideoToolbox
 
 class PublisherView: ExpoView {
 
@@ -36,6 +37,7 @@ class PublisherView: ExpoView {
   private var isPreviewStarted = false
   private var isMuted = false
   private var isFlashOn = false
+  private var isSwitchingCamera = false
   private var bitrateTimer: Timer?
 
   // MARK: - Init
@@ -160,12 +162,12 @@ class PublisherView: ExpoView {
         let videoSettings = VideoCodecSettings(
           videoSize: CGSize(width: CGFloat(videoWidth), height: CGFloat(videoHeight)),
           bitRate: videoBitrate,
-          scalingMode: .cropSourceToCleanAperture,
           maxKeyFrameIntervalDuration: 1,
           allowFrameReordering: false
         )
         let audioSettings = AudioCodecSettings(
-          bitRate: audioBitrate
+          bitRate: audioBitrate,
+          downmix: false  // Keep stereo for better ExoPlayer compatibility
         )
         await stream?.setVideoSettings(videoSettings)
         await stream?.setAudioSettings(audioSettings)
@@ -217,9 +219,26 @@ class PublisherView: ExpoView {
   }
 
   func switchCamera() {
+    guard !isSwitchingCamera else {
+      print("[ExpoLiveStream] switchCamera: switch in progress, ignoring")
+      return
+    }
+    isSwitchingCamera = true
+
     let newPosition: AVCaptureDevice.Position = isFrontCamera ? .back : .front
     isFrontCamera = !isFrontCamera
     updateMirror()
+
+    // Flash auto-off for front camera
+    if isFrontCamera && isFlashOn {
+      if let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) {
+        try? device.lockForConfiguration()
+        device.torchMode = .off
+        device.unlockForConfiguration()
+      }
+      isFlashOn = false
+    }
+
     let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: newPosition)
 
     if let mixer = mixer {
@@ -229,7 +248,13 @@ class PublisherView: ExpoView {
         } catch {
           print("[ExpoLiveStream] Switch camera error: \(error)")
         }
+        // Unlock on main thread after attach completes
+        await MainActor.run {
+          self.isSwitchingCamera = false
+        }
       }
+    } else {
+      isSwitchingCamera = false
     }
   }
 
@@ -276,7 +301,8 @@ class PublisherView: ExpoView {
     bitrateTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
       guard let self = self, let stream = self.stream else { return }
       Task {
-        let bytesPerSecond = stream.info.currentBytesPerSecond
+        let info = await stream.info
+        let bytesPerSecond = info.currentBytesPerSecond
         await MainActor.run {
           self.onBitrateUpdate(["bitrate": bytesPerSecond * 8])
         }

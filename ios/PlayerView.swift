@@ -18,14 +18,23 @@ class PlayerView: ExpoView, VLCMediaPlayerDelegate {
   let onPlayerStateChanged = EventDispatcher()
   let onPlayerError = EventDispatcher()
 
-  // MARK: - State
+  // MARK: - State (exactly matches Android PlayerView.kt)
   private var isPlaying = false
+  private var lastPlayRequestAt: TimeInterval = 0
+  // Auto-reconnect (matches ExoPlayer's built-in retry)
+  private var reconnectAttempts = 0
+  private let maxReconnectAttempts = 3
+  private var reconnectTimer: Timer?
+
+  // MARK: - Rotation (matches Android DisplayManager.DisplayListener)
+  private var orientationObserver: NSObjectProtocol?
 
   // MARK: - Init
   required public init(appContext: AppContext? = nil) {
     super.init(appContext: appContext)
     PlayerView.activeInstance = self
-    setupPlayer()
+    setupView()
+    registerOrientationListener()
   }
 
   override init(frame: CGRect) {
@@ -37,14 +46,31 @@ class PlayerView: ExpoView, VLCMediaPlayerDelegate {
     fatalError("init(coder:) has not been implemented")
   }
 
-  // MARK: - Layout
-  override func layoutSubviews() {
-    super.layoutSubviews()
-    videoView?.frame = bounds
+  // MARK: - Rotation Handling (matches Android DisplayManager.DisplayListener)
+  private func registerOrientationListener() {
+    orientationObserver = NotificationCenter.default.addObserver(
+      forName: UIDevice.orientationDidChangeNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      self?.forceRemeasure()
+    }
   }
 
-  // MARK: - Setup
-  private func setupPlayer() {
+  // Matches Android forceRemeasure()
+  private func forceRemeasure() {
+    guard let videoView = videoView else { return }
+    videoView.frame = bounds
+  }
+
+  // MARK: - Layout (matches Android onLayout + requestLayout)
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    forceRemeasure()
+  }
+
+  // MARK: - Setup (matches Android setupView)
+  private func setupView() {
     let view = UIView(frame: bounds)
     view.backgroundColor = .black
     view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -54,12 +80,26 @@ class PlayerView: ExpoView, VLCMediaPlayerDelegate {
     let player = VLCMediaPlayer()
     player.delegate = self
     player.drawable = view
-    player.scaleFactor = 0  // best fit — fill view maintaining aspect ratio
+    player.scaleFactor = 0  // Best fit — matches Android RESIZE_MODE_FIT
     mediaPlayer = player
   }
 
   // MARK: - Public Methods
+
+  // Matches Android play() — with 800ms duplicate throttle
   func play() {
+    let now = Date().timeIntervalSince1970
+    if now - lastPlayRequestAt < 0.8 {
+      print("[ExpoLiveStreamPlayer] play: duplicate request ignored")
+      return
+    }
+    lastPlayRequestAt = now
+
+    if isPlaying {
+      print("[ExpoLiveStreamPlayer] play: already active, ignoring")
+      return
+    }
+
     var connectUrl = url
     let playName = streamName
 
@@ -72,78 +112,176 @@ class PlayerView: ExpoView, VLCMediaPlayerDelegate {
       return
     }
 
-    // Stop previous playback
-    if isPlaying {
-      mediaPlayer?.stop()
-    }
-
-    isPlaying = true
+    print("[ExpoLiveStreamPlayer] play: url=\(connectUrl)")
     onPlayerStateChanged(["state": "connecting"])
 
-    // Configure VLC media with low-latency RTMP options
-    let media = VLCMedia(url: URL(string: connectUrl)!)
+    mediaPlayer?.stop()
+    isPlaying = true
 
-    media.addOption("--network-caching=150")
-    media.addOption("--rtmp-buffer=50")
-    media.addOption("--live-caching=150")
+    guard let mediaUrl = URL(string: connectUrl) else {
+      onPlayerError(["msg": "Invalid URL"])
+      isPlaying = false
+      return
+    }
+    let media = VLCMedia(url: mediaUrl)
+    media.addOption("--network-caching=100")
+    media.addOption("--rtmp-buffer=0")
+    media.addOption("--live-caching=100")
     media.addOption("--clock-jitter=0")
     media.addOption("--clock-synchro=0")
     media.addOption("--file-caching=0")
+    // Drop late frames instead of buffering — keeps playback close to real-time
+    media.addOption("--drop-late-frames")
+    media.addOption("--skip-frames")
 
     mediaPlayer?.media = media
     mediaPlayer?.play()
   }
 
+  // Matches Android stop()
   func stop() {
-    guard isPlaying else { return }
+    guard isPlaying || mediaPlayer?.isPlaying == true else { return }
     isPlaying = false
+    stopReconnectPoller()
     mediaPlayer?.stop()
+    print("[ExpoLiveStreamPlayer] stop: success")
     onPlayerStateChanged(["state": "stopped"])
   }
 
+  // Matches Android pause()
   func pause() {
-    guard isPlaying else { return }
-    mediaPlayer?.pause()
+    guard let player = mediaPlayer, player.isPlaying else { return }
+    player.pause()
     onPlayerStateChanged(["state": "paused"])
   }
 
+  // Matches Android resume() — for live streams, restart playback to jump to live edge
+  // VLC doesn't auto-seek to live edge like ExoPlayer does
   func resume() {
+    guard mediaPlayer != nil else { return }
+    // For live RTMP: stop and re-play to get the latest live position
+    mediaPlayer?.stop()
     mediaPlayer?.play()
     onPlayerStateChanged(["state": "playing"])
   }
 
-  // MARK: - VLCMediaPlayerDelegate
+  // MARK: - VLCMediaPlayerDelegate (matches Android Player.Listener)
+
   func mediaPlayerStateChanged(_ aNotification: Notification) {
     guard let player = mediaPlayer else { return }
 
     switch player.state {
     case .playing:
-      // Delay aspect ratio update to ensure VLC rendering is ready
+      // Matches Android STATE_READY → "playing"
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
         guard let self = self, let player = self.mediaPlayer, player.isPlaying else { return }
-        // "FILL_TO_SCREEN" is VLCKit's built-in way to fit without black bars
         player.videoAspectRatio = UnsafeMutablePointer<CChar>(mutating: ("FILL_TO_SCREEN" as NSString).utf8String)
       }
       onPlayerStateChanged(["state": "playing"])
+      reconnectAttempts = 0  // Reset on successful play
+      stopReconnectPoller()  // Stream is back — cancel any poller
+
     case .buffering:
+      // Matches Android STATE_BUFFERING → "buffering"
       onPlayerStateChanged(["state": "buffering"])
+
     case .error:
-      isPlaying = false
-      onPlayerError(["msg": "VLC playback error"])
-      onPlayerStateChanged(["state": "failed"])
+      // Stream error — start polling for reconnect
+      if isPlaying {
+        startReconnectPoller()
+      } else {
+        onPlayerError(["msg": "VLC playback error"])
+        onPlayerStateChanged(["state": "failed"])
+      }
+
     case .ended, .stopped:
-      isPlaying = false
-      onPlayerStateChanged(["state": "stopped"])
+      // Stream ended while we expected it to be playing — publisher probably stopped
+      // Start polling to reconnect when publisher comes back
+      if isPlaying {
+        startReconnectPoller()
+      }
+      // If !isPlaying, user called stop() — do nothing (already handled)
+
     default:
       break
     }
   }
 
-  // MARK: - Cleanup
-  override func removeFromSuperview() {
-    super.removeFromSuperview()
-    if PlayerView.activeInstance === self {
-      PlayerView.activeInstance = nil
+  // MARK: - Smart Reconnect Poller
+  // Polls every 5 seconds to see if stream is back online (publisher restarted)
+  // Doesn't interfere with normal playback — only activates after stream actually dies
+  private func startReconnectPoller() {
+    // Don't start multiple pollers
+    guard reconnectTimer == nil else { return }
+    reconnectAttempts = 0
+
+    print("[ExpoLiveStreamPlayer] stream lost — starting reconnect poller")
+    onPlayerStateChanged(["state": "buffering"])
+
+    reconnectTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] timer in
+      guard let self = self else { timer.invalidate(); return }
+
+      self.reconnectAttempts += 1
+      print("[ExpoLiveStreamPlayer] reconnect poll \(self.reconnectAttempts)/\(self.maxReconnectAttempts)")
+
+      if self.reconnectAttempts >= self.maxReconnectAttempts {
+        // Give up
+        timer.invalidate()
+        self.reconnectTimer = nil
+        self.isPlaying = false
+        self.reconnectAttempts = 0
+        self.onPlayerError(["msg": "Stream lost — reconnect failed"])
+        self.onPlayerStateChanged(["state": "failed"])
+        return
+      }
+
+      // Try fresh connection with new media
+      self.mediaPlayer?.stop()
+
+      var connectUrl = self.url
+      let playName = self.streamName
+      if !playName.isEmpty && !connectUrl.hasSuffix("/\(playName)") {
+        connectUrl = "\(connectUrl)/\(playName)"
+      }
+      guard let mediaUrl = URL(string: connectUrl) else { return }
+
+      let media = VLCMedia(url: mediaUrl)
+      media.addOption("--network-caching=100")
+      media.addOption("--rtmp-buffer=0")
+      media.addOption("--live-caching=100")
+      media.addOption("--clock-jitter=0")
+      media.addOption("--clock-synchro=0")
+      media.addOption("--file-caching=0")
+      media.addOption("--drop-late-frames")
+      media.addOption("--skip-frames")
+
+      self.mediaPlayer?.media = media
+      self.mediaPlayer?.play()
+    }
+  }
+
+  private func stopReconnectPoller() {
+    reconnectTimer?.invalidate()
+    reconnectTimer = nil
+    reconnectAttempts = 0
+  }
+
+  // VLC doesn't have ExoPlayer's STATE_READY. When VLC is stuck in "buffering"
+  // but actually playing, timeChanged fires. This mimics Android's STATE_READY → "playing".
+  func mediaPlayerTimeChanged(_ aNotification: Notification) {
+    guard let player = mediaPlayer, player.isPlaying else { return }
+    // If VLC says it's playing but we never got the .playing state callback, force it now
+    onPlayerStateChanged(["state": "playing"])
+  }
+
+  // MARK: - Cleanup (matches Android cleanup + onDetachedFromWindow)
+
+  private func cleanup() {
+    reconnectTimer?.invalidate()
+    reconnectTimer = nil
+    if let observer = orientationObserver {
+      NotificationCenter.default.removeObserver(observer)
+      orientationObserver = nil
     }
     if isPlaying {
       mediaPlayer?.stop()
@@ -151,11 +289,17 @@ class PlayerView: ExpoView, VLCMediaPlayerDelegate {
     }
     mediaPlayer?.delegate = nil
     mediaPlayer = nil
+    if PlayerView.activeInstance === self {
+      PlayerView.activeInstance = nil
+    }
+  }
+
+  override func removeFromSuperview() {
+    super.removeFromSuperview()
+    cleanup()
   }
 
   deinit {
-    mediaPlayer?.stop()
-    mediaPlayer?.delegate = nil
-    mediaPlayer = nil
+    cleanup()
   }
 }

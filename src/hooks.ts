@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import type { LiveStreamPublisherRef, StreamState } from './ExpoLiveStreamPublisherView';
 
 // ─── Statistics ──────────────────────────────────────────────

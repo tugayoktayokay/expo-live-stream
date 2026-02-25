@@ -17,13 +17,14 @@ RTMP live stream **publisher** & **player** for React Native — built as a nati
 - 🎥 **RTMP Publisher** — Stream live video from device camera with full controls
 - 📺 **RTMP Player** — Watch live RTMP streams with `autoPlay` support
 - 🔐 **RTMPS** — Secure streaming over SSL/TLS (`rtmps://`)
-- 🔄 **Auto-Reconnect** — Exponential backoff with configurable retries
+- 🔄 **Auto-Reconnect** — Smart reconnect at both JS (hooks) and native level
 - 📊 **Live Statistics** — Bitrate, duration, bytes sent in real-time
 - 🖼️ **Watermark Overlay** — Custom image or text watermark with 5 positions
 - 🎚️ **Quality Presets** — `VideoQuality.HD_720P`, `FHD_1080P`, etc.
 - 🪝 **React Hooks** — `useLiveStream()` and `useLiveStreamPlayer()` for reactive state
-- 🍎 **iOS** — [HaishinKit 2.0](https://github.com/shogo4405/HaishinKit.swift) (publisher & player)
-- 🤖 **Android** — [RootEncoder](https://github.com/pedroSG94/RootEncoder) (publisher) + [ExoPlayer/Media3](https://developer.android.com/media/media3) (player)
+- 📱 **Rotation Support** — Seamless video playback during device orientation changes
+- 🍎 **iOS** — [HaishinKit 2.0](https://github.com/shogo4405/HaishinKit.swift) (publisher) + [VLCKit](https://code.videolan.org/videolan/VLCKit) (player)
+- 🤖 **Android** — [RootEncoder](https://github.com/pedroSG94/RootEncoder) (publisher) + [VLC](https://code.videolan.org/videolan/vlc-android) (player)
 - ⚡ **Expo Modules API** — Native performance, no bridge overhead
 
 ---
@@ -57,7 +58,7 @@ import {
   ExpoLiveStreamPublisherView,
   useLiveStream,
   VideoQuality,
-} from 'expo-live-stream';
+} from "expo-live-stream";
 
 function StreamScreen() {
   const { ref, isStreaming, start, stop, switchCamera } = useLiveStream();
@@ -79,7 +80,7 @@ function StreamScreen() {
 ### 2. Player (Watching)
 
 ```tsx
-import { ExpoLiveStreamPlayerView } from 'expo-live-stream';
+import { ExpoLiveStreamPlayerView } from "expo-live-stream";
 
 function WatchScreen() {
   return (
@@ -132,7 +133,7 @@ function WatchScreen() {
 ### Quality Presets
 
 ```tsx
-import { VideoQuality } from 'expo-live-stream';
+import { VideoQuality } from "expo-live-stream";
 ```
 
 | Preset      | Resolution | Video Bitrate | FPS |
@@ -227,10 +228,10 @@ Both publisher and player natively support RTMPS — just use `rtmps://` instead
 
 ```tsx
 // Unencrypted
-url = 'rtmp://server/live/key';
+url = "rtmp://server/live/key";
 
 // Encrypted (SSL/TLS)
-url = 'rtmps://server/live/key';
+url = "rtmps://server/live/key";
 ```
 
 ---
@@ -249,8 +250,8 @@ const stream = useLiveStream({
     backoffMultiplier: 2, // exponential multiplier (default: 2)
     onReconnectAttempt: (attempt, max) =>
       console.log(`Retry ${attempt}/${max}`),
-    onReconnectFailed: () => Alert.alert('Connection lost'),
-    onReconnectSuccess: () => console.log('Reconnected!'),
+    onReconnectFailed: () => Alert.alert("Connection lost"),
+    onReconnectSuccess: () => console.log("Reconnected!"),
   },
 });
 ```
@@ -303,11 +304,12 @@ import { LiveStreamWatermark } from 'expo-live-stream';
 
 ## Native Dependencies
 
-| Platform | Library                                                         | Purpose             |
-| -------- | --------------------------------------------------------------- | ------------------- |
-| iOS      | [HaishinKit 2.0](https://github.com/shogo4405/HaishinKit.swift) | RTMP publish & play |
-| Android  | [RootEncoder](https://github.com/pedroSG94/RootEncoder)         | RTMP publish        |
-| Android  | [ExoPlayer/Media3](https://developer.android.com/media/media3)  | RTMP playback       |
+| Platform | Library                                                         | Purpose       |
+| -------- | --------------------------------------------------------------- | ------------- |
+| iOS      | [HaishinKit 2.0](https://github.com/shogo4405/HaishinKit.swift) | RTMP publish  |
+| iOS      | [MobileVLCKit](https://code.videolan.org/videolan/VLCKit)       | RTMP playback |
+| Android  | [RootEncoder 2.6.7](https://github.com/pedroSG94/RootEncoder)   | RTMP publish  |
+| Android  | [libVLC 3.6.5](https://code.videolan.org/videolan/vlc-android)  | RTMP playback |
 
 ## License
 
