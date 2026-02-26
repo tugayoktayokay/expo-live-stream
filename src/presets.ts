@@ -111,3 +111,39 @@ export enum PlayerState {
     STOPPED = 'stopped',
     FAILED = 'failed',
 }
+
+// ─── Stream Protocol ────────────────────────────────────────
+
+export enum StreamProtocol {
+    /** Real-Time Messaging Protocol */
+    RTMP = 'rtmp',
+    /** RTMP over TLS/SSL */
+    RTMPS = 'rtmps',
+    /** Real-Time Streaming Protocol (IP cameras) */
+    RTSP = 'rtsp',
+    /** HTTP Live Streaming (Apple/YouTube) */
+    HLS = 'hls',
+    /** HTTP Progressive (MP4, FLV, MKV files) */
+    HTTP = 'http',
+    /** Secure Reliable Transport */
+    SRT = 'srt',
+    /** Auto-detect from URL scheme */
+    AUTO = 'auto',
+}
+
+/**
+ * Auto-detect streaming protocol from a URL.
+ * @param url The stream URL
+ * @returns The detected protocol
+ */
+export function detectProtocol(url: string): StreamProtocol {
+    const lower = url.toLowerCase();
+    if (lower.startsWith('rtmps://')) return StreamProtocol.RTMPS;
+    if (lower.startsWith('rtmp://')) return StreamProtocol.RTMP;
+    if (lower.startsWith('rtsp://') || lower.startsWith('rtsps://')) return StreamProtocol.RTSP;
+    if (lower.startsWith('srt://')) return StreamProtocol.SRT;
+    if (lower.endsWith('.m3u8') || lower.includes('.m3u8?')) return StreamProtocol.HLS;
+    if (lower.endsWith('.mp4') || lower.endsWith('.flv') || lower.endsWith('.mkv') || lower.endsWith('.ts')) return StreamProtocol.HTTP;
+    if (lower.startsWith('http://') || lower.startsWith('https://')) return StreamProtocol.HLS; // Default HTTP to HLS
+    return StreamProtocol.RTMP; // Fallback
+}

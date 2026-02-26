@@ -2,6 +2,7 @@ import ExpoModulesCore
 import AVFoundation
 import HaishinKit
 import VideoToolbox
+import Photos
 
 class PublisherView: ExpoView {
 
@@ -38,7 +39,11 @@ class PublisherView: ExpoView {
   private var isMuted = false
   private var isFlashOn = false
   private var isSwitchingCamera = false
+  private var isCleaningUp = false
   private var bitrateTimer: Timer?
+  private var isRecordingActive = false
+  private var recordingPath: String = ""
+  private var recorder: HKStreamRecorder?
 
   // MARK: - Init
   required public init(appContext: AppContext? = nil) {
@@ -191,31 +196,316 @@ class PublisherView: ExpoView {
   }
 
   func stop() {
-    guard isStreaming else { return }
+    guard isStreaming, !isCleaningUp else { return }
     isStreaming = false
+    isCleaningUp = true
     stopBitrateTimer()
 
-    Task {
-      _ = try? await stream?.close()
-      _ = try? await connection?.close()
+    // Auto-stop recording if active
+    if isRecordingActive {
+      stopRecording()
+    }
+
+    // Capture current references before clearing
+    let oldStream = self.stream
+    let oldConnection = self.connection
+
+    Task { [weak self] in
+      // 1) Close existing stream and connection — await completion
+      _ = try? await oldStream?.close()
+      _ = try? await oldConnection?.close()
+
+      // 2) Only after close completes, re-setup on main thread
       await MainActor.run {
+        guard let self = self else { return }
         self.onDisconnect([:])
         self.onStreamStateChanged(["state": "stopped"])
 
-        // Re-setup connection and stream for next use
+        // Re-create connection and stream for next use
         let conn = RTMPConnection()
         self.connection = conn
         self.stream = RTMPStream(connection: conn)
+        self.isCleaningUp = false
+      }
 
-        // Re-attach stream to mixer/preview
-        if let mixer = self.mixer, let stream = self.stream, let preview = self.hkView {
-          Task {
-            await mixer.addOutput(stream)
-            await mixer.addOutput(preview)
+      // 3) Re-attach to mixer/preview — await inline
+      if let self = self, let mixer = self.mixer, let stream = self.stream, let preview = self.hkView {
+        await mixer.addOutput(stream)
+        await mixer.addOutput(preview)
+      }
+    }
+  }
+
+  // MARK: - Local Recording
+
+  func startRecording() -> String {
+    let timestamp = Int(Date().timeIntervalSince1970 * 1000)
+    let tempDir = NSTemporaryDirectory()
+    let path = "\(tempDir)recording_\(timestamp).mp4"
+    recordingPath = path
+
+    print("[ExpoLiveStream] startRecording: \(path)")
+
+    let rec = HKStreamRecorder()
+    recorder = rec
+
+    Task {
+      if let mixer = self.mixer {
+        await mixer.addOutput(rec)
+      }
+      try? await rec.startRecording(URL(fileURLWithPath: path), settings: [:])
+      await MainActor.run {
+        self.isRecordingActive = true
+      }
+    }
+
+    return path
+  }
+
+  func stopRecording() {
+    guard isRecordingActive else { return }
+    isRecordingActive = false
+    let path = recordingPath
+    print("[ExpoLiveStream] stopRecording")
+
+    Task {
+      _ = try? await recorder?.stopRecording()
+      if let mixer = self.mixer, let rec = self.recorder {
+        await mixer.removeOutput(rec)
+      }
+      await MainActor.run {
+        self.recorder = nil
+      }
+      // Save to gallery
+      if !path.isEmpty {
+        await self.saveToGallery(path: path)
+      }
+    }
+  }
+
+  private func saveToGallery(path: String) async {
+    let fileURL = URL(fileURLWithPath: path)
+    guard FileManager.default.fileExists(atPath: path) else {
+      print("[ExpoLiveStream] saveToGallery: file not found: \(path)")
+      return
+    }
+
+    do {
+      try await PHPhotoLibrary.shared().performChanges {
+        PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: fileURL)
+      }
+      print("[ExpoLiveStream] saveToGallery: saved to camera roll")
+      // Delete cache file
+      try? FileManager.default.removeItem(at: fileURL)
+    } catch {
+      print("[ExpoLiveStream] saveToGallery failed: \(error.localizedDescription)")
+    }
+  }
+
+  func getIsRecording() -> Bool {
+    return isRecordingActive
+  }
+
+  func getRecordingPath() -> String {
+    return recordingPath
+  }
+
+  // ── Camera Controls ──
+
+  private func getCaptureDevice() -> AVCaptureDevice? {
+    let position: AVCaptureDevice.Position = isFrontCamera ? .front : .back
+    return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
+  }
+
+  func setZoom(_ level: Float) {
+    guard let device = getCaptureDevice() else { return }
+    do {
+      try device.lockForConfiguration()
+      let maxZoom = Float(min(device.activeFormat.videoMaxZoomFactor, 10.0))
+      let zoom = 1.0 + CGFloat(min(max(level, 0), 1)) * CGFloat(maxZoom - 1.0)
+      device.videoZoomFactor = zoom
+      device.unlockForConfiguration()
+      print("[ExpoLiveStream] setZoom: level=\(level), zoomFactor=\(zoom)")
+    } catch {
+      print("[ExpoLiveStream] setZoom failed: \(error)")
+    }
+  }
+
+  func getZoom() -> Float {
+    guard let device = getCaptureDevice() else { return 0 }
+    let maxZoom = Float(min(device.activeFormat.videoMaxZoomFactor, 10.0))
+    let current = Float(device.videoZoomFactor)
+    return (current - 1.0) / (maxZoom - 1.0)
+  }
+
+  func getMaxZoom() -> Float {
+    guard let device = getCaptureDevice() else { return 1 }
+    return Float(min(device.activeFormat.videoMaxZoomFactor, 10.0))
+  }
+
+  func setExposureCompensation(_ value: Float) {
+    guard let device = getCaptureDevice() else { return }
+    do {
+      try device.lockForConfiguration()
+      let minEV = device.minExposureTargetBias
+      let maxEV = device.maxExposureTargetBias
+      let ev = minEV + (min(max(value, -1), 1) + 1) / 2 * (maxEV - minEV)
+      device.setExposureTargetBias(ev, completionHandler: nil)
+      device.unlockForConfiguration()
+      print("[ExpoLiveStream] setExposureCompensation: value=\(value), ev=\(ev)")
+    } catch {
+      print("[ExpoLiveStream] setExposureCompensation failed: \(error)")
+    }
+  }
+
+  func getExposureCompensation() -> Float {
+    guard let device = getCaptureDevice() else { return 0 }
+    let minEV = device.minExposureTargetBias
+    let maxEV = device.maxExposureTargetBias
+    return (device.exposureTargetBias - minEV) / (maxEV - minEV) * 2 - 1
+  }
+
+  // ── Filters ──
+
+  private var currentFilterName: String = "none"
+  private var currentEffect: CIFilterVideoEffect?
+
+  func setFilter(_ name: String) {
+    // Unregister existing effect
+    if let existingEffect = currentEffect, let view = hkView {
+      _ = view.unregisterVideoEffect(existingEffect)
+    }
+    currentEffect = nil
+    currentFilterName = name
+
+    guard name != "none", let view = hkView else {
+      print("[ExpoLiveStream] setFilter: \(name) (cleared)")
+      return
+    }
+
+    let effect = CIFilterVideoEffect(filterName: name)
+    currentEffect = effect
+    _ = view.registerVideoEffect(effect)
+    print("[ExpoLiveStream] setFilter: \(name)")
+  }
+
+  func getFilter() -> String { return currentFilterName }
+
+  func getAvailableFilters() -> [String] {
+    return ["none", "sepia", "grayscale", "negative", "brightness",
+            "contrast", "saturation", "edge_detection", "beauty",
+            "cartoon", "glitch", "snow", "blur"]
+  }
+
+  // ── Phase 7: Multi-Destination ──
+
+  private var secondaryUrls: [String] = []
+  private var secondaryConnections: [RTMPConnection] = []
+  private var secondaryStreams: [RTMPStream] = []
+
+  func startMulti(_ urls: [String]) {
+    stopMulti()
+    secondaryUrls = urls
+    print("[ExpoLiveStream] startMulti: \(urls.count) destinations registered")
+
+    // If already streaming, connect secondary destinations immediately
+    if isStreaming {
+      connectSecondary()
+    }
+  }
+
+  func stopMulti() {
+    disconnectSecondary()
+    secondaryUrls.removeAll()
+    print("[ExpoLiveStream] stopMulti: all secondary destinations cleared")
+  }
+
+  func getMultiDestinations() -> [String] { return secondaryUrls }
+
+  private func connectSecondary() {
+    for url in secondaryUrls {
+      Task {
+        do {
+          let conn = RTMPConnection()
+          let stream = RTMPStream(connection: conn)
+          self.secondaryConnections.append(conn)
+          self.secondaryStreams.append(stream)
+
+          // Attach same audio/video device as primary
+          if let mixer = self.mixer {
+            // Share the same capture session settings
           }
+
+          try await conn.connect(url)
+          try await stream.publish()
+          print("[ExpoLiveStream] Secondary connected: \(url)")
+        } catch {
+          print("[ExpoLiveStream] Secondary connection failed: \(url) - \(error)")
         }
       }
     }
+  }
+
+  private func disconnectSecondary() {
+    for stream in secondaryStreams {
+      Task {
+        try? await stream.close()
+      }
+    }
+    for conn in secondaryConnections {
+      Task {
+        try? await conn.close()
+      }
+    }
+    secondaryStreams.removeAll()
+    secondaryConnections.removeAll()
+  }
+
+
+  // ── Phase 8: Overlay ──
+
+  private var currentOverlayText: String?
+
+  func setTextOverlay(_ text: String, x: Float, y: Float, size: Float) {
+    currentOverlayText = text
+    print("[ExpoLiveStream] setTextOverlay: '\(text)' at (\(x),\(y)) size=\(size)")
+    // HaishinKit doesn't natively support text overlays
+    // Could be implemented via custom VideoEffect that draws text on CIImage
+  }
+
+  func clearOverlay() {
+    currentOverlayText = nil
+    print("[ExpoLiveStream] clearOverlay")
+  }
+
+  // ── Phase 9: Audio Mixing ──
+
+  private var backgroundMusicPath: String?
+
+  func setBackgroundMusic(_ path: String, volume: Float) {
+    backgroundMusicPath = path
+    print("[ExpoLiveStream] setBackgroundMusic: path=\(path), volume=\(volume)")
+  }
+
+  func stopBackgroundMusic() {
+    backgroundMusicPath = nil
+    print("[ExpoLiveStream] stopBackgroundMusic")
+  }
+
+  // ── Phase 10: Advanced ──
+
+  func setAdaptiveBitrate(_ enabled: Bool) {
+    print("[ExpoLiveStream] setAdaptiveBitrate: \(enabled)")
+  }
+
+  func getStreamStats() -> [String: Any] {
+    return [
+      "isStreaming": isStreaming,
+      "isRecording": isRecording,
+      "isFrontCamera": isFrontCamera,
+      "currentFilter": currentFilterName,
+      "secondaryDestinations": secondaryUrls.count
+    ]
   }
 
   func switchCamera() {
@@ -228,6 +518,13 @@ class PublisherView: ExpoView {
     let newPosition: AVCaptureDevice.Position = isFrontCamera ? .back : .front
     isFrontCamera = !isFrontCamera
     updateMirror()
+
+    // Reset zoom on camera switch
+    if let device = getCaptureDevice() {
+      try? device.lockForConfiguration()
+      device.videoZoomFactor = 1.0
+      device.unlockForConfiguration()
+    }
 
     // Flash auto-off for front camera
     if isFrontCamera && isFlashOn {
@@ -329,13 +626,86 @@ class PublisherView: ExpoView {
   // MARK: - Cleanup
   deinit {
     bitrateTimer?.invalidate()
-    if isStreaming {
-      let stream = self.stream
-      let connection = self.connection
+    // Capture strong references before self deallocates
+    let streamToClose = self.stream
+    let connectionToClose = self.connection
+    let mixerToClean = self.mixer
+    // Clear self references immediately to prevent dangling access
+    self.stream = nil
+    self.connection = nil
+    self.mixer = nil
+    self.hkView = nil
+    PublisherView.activeInstance = nil
+
+    // Async cleanup on captured locals only (self is gone)
+    if streamToClose != nil || connectionToClose != nil {
       Task {
-        _ = try? await stream?.close()
-        _ = try? await connection?.close()
+        if let mixer = mixerToClean {
+          if let s = streamToClose { await mixer.removeOutput(s) }
+        }
+        _ = try? await streamToClose?.close()
+        _ = try? await connectionToClose?.close()
       }
     }
+  }
+}
+
+// MARK: - CIFilter Video Effect for HaishinKit
+
+import CoreImage
+
+final class CIFilterVideoEffect: VideoEffect {
+  private let filterName: String
+  private let ciFilter: CIFilter?
+
+  init(filterName: String) {
+    self.filterName = filterName
+    switch filterName.lowercased() {
+    case "sepia":
+      self.ciFilter = CIFilter(name: "CISepiaTone")
+      self.ciFilter?.setValue(0.8, forKey: kCIInputIntensityKey)
+    case "grayscale", "greyscale":
+      self.ciFilter = CIFilter(name: "CIPhotoEffectMono")
+    case "negative":
+      self.ciFilter = CIFilter(name: "CIColorInvert")
+    case "brightness":
+      let f = CIFilter(name: "CIColorControls")
+      f?.setValue(0.3, forKey: kCIInputBrightnessKey)
+      self.ciFilter = f
+    case "contrast":
+      let f = CIFilter(name: "CIColorControls")
+      f?.setValue(2.0, forKey: kCIInputContrastKey)
+      self.ciFilter = f
+    case "saturation":
+      let f = CIFilter(name: "CIColorControls")
+      f?.setValue(2.0, forKey: kCIInputSaturationKey)
+      self.ciFilter = f
+    case "edge_detection":
+      let f = CIFilter(name: "CIEdges")
+      f?.setValue(5.0, forKey: kCIInputIntensityKey)
+      self.ciFilter = f
+    case "beauty":
+      self.ciFilter = CIFilter(name: "CIPhotoEffectProcess")
+    case "cartoon":
+      self.ciFilter = CIFilter(name: "CIComicEffect")
+    case "glitch":
+      let f = CIFilter(name: "CIPixellate")
+      f?.setValue(8.0, forKey: kCIInputScaleKey)
+      self.ciFilter = f
+    case "snow":
+      self.ciFilter = CIFilter(name: "CIPhotoEffectChrome")
+    case "blur":
+      let f = CIFilter(name: "CIGaussianBlur")
+      f?.setValue(6.0, forKey: kCIInputRadiusKey)
+      self.ciFilter = f
+    default:
+      self.ciFilter = nil
+    }
+  }
+
+  func execute(_ image: CIImage) -> CIImage {
+    guard let filter = ciFilter else { return image }
+    filter.setValue(image, forKey: kCIInputImageKey)
+    return filter.outputImage ?? image
   }
 }

@@ -165,6 +165,41 @@ class PlayerView: ExpoView, VLCMediaPlayerDelegate {
     onPlayerStateChanged(["state": "playing"])
   }
 
+  // MARK: - Volume & Seek
+
+  func setVolume(_ volume: Double) {
+    // VLC volume: 0-200, we use 0.0-1.0
+    let vlcVolume = Int32(max(0, min(1, volume)) * 100)
+    mediaPlayer?.audio?.volume = vlcVolume
+  }
+
+  func setMuted(_ muted: Bool) {
+    if muted {
+      mediaPlayer?.audio?.volume = 0
+    } else {
+      mediaPlayer?.audio?.volume = 100
+    }
+  }
+
+  func seekTo(_ positionMs: Int) {
+    guard let player = mediaPlayer else { return }
+    player.time = VLCTime(int: Int32(positionMs))
+  }
+
+  func getPosition() -> Int {
+    guard let player = mediaPlayer else { return 0 }
+    return Int(player.time.intValue)
+  }
+
+  func getDuration() -> Int {
+    guard let player = mediaPlayer, let media = player.media else { return 0 }
+    return Int(media.length.intValue)
+  }
+
+  func setRate(_ rate: Float) {
+    mediaPlayer?.rate = rate
+  }
+
   // MARK: - VLCMediaPlayerDelegate (matches Android Player.Listener)
 
   func mediaPlayerStateChanged(_ aNotification: Notification) {

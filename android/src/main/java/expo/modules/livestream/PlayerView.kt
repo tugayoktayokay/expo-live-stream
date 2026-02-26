@@ -302,6 +302,33 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
     }
   }
 
+  // Volume & Seek
+
+  fun setVolume(volume: Double) {
+    val vlcVolume = (volume.coerceIn(0.0, 1.0) * 100).toInt()
+    mediaPlayer?.volume = vlcVolume
+  }
+
+  fun setMuted(muted: Boolean) {
+    mediaPlayer?.volume = if (muted) 0 else 100
+  }
+
+  fun seekTo(positionMs: Long) {
+    mediaPlayer?.time = positionMs
+  }
+
+  fun getPosition(): Long {
+    return mediaPlayer?.time ?: 0L
+  }
+
+  fun getDuration(): Long {
+    return mediaPlayer?.length ?: 0L
+  }
+
+  fun setRate(rate: Float) {
+    mediaPlayer?.rate = rate
+  }
+
   // Smart Reconnect (matches iOS — 5s interval, 3 max)
   private fun startReconnectPoller() {
     if (reconnectHandler != null) return

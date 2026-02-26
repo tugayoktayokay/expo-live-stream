@@ -1,10 +1,10 @@
 import {
   requireNativeViewManager,
   requireNativeModule,
-} from 'expo-modules-core';
-import React, { forwardRef, useImperativeHandle, useRef, useMemo } from 'react';
-import { ViewProps } from 'react-native';
-import { VideoQuality, QualityPresets, QualityConfig } from './presets';
+} from "expo-modules-core";
+import React, { forwardRef, useImperativeHandle, useRef, useMemo } from "react";
+import { ViewProps } from "react-native";
+import { VideoQuality, QualityPresets, QualityConfig } from "./presets";
 
 // ---- Types ----
 
@@ -14,16 +14,40 @@ export type LiveStreamPublisherRef = {
   switchCamera: () => void;
   toggleFlash: () => void;
   toggleMute: () => void;
+  startRecording: () => Promise<string>;
+  stopRecording: () => void;
+  isRecording: () => Promise<boolean>;
+  setZoom: (level: number) => void;
+  getZoom: () => Promise<number>;
+  getMaxZoom: () => Promise<number>;
+  setExposure: (value: number) => void;
+  getExposure: () => Promise<number>;
+  setFilter: (name: string) => void;
+  getFilter: () => Promise<string>;
+  getAvailableFilters: () => Promise<string[]>;
+  // Phase 7: Multi-Destination
+  startMulti: (urls: string[]) => void;
+  stopMulti: () => void;
+  getMultiDestinations: () => Promise<string[]>;
+  // Phase 8: Overlay
+  setTextOverlay: (text: string, x: number, y: number, size: number) => void;
+  clearOverlay: () => void;
+  // Phase 9: Audio
+  setBackgroundMusic: (path: string, volume: number) => void;
+  stopBackgroundMusic: () => void;
+  // Phase 10: Advanced
+  setAdaptiveBitrate: (enabled: boolean) => void;
+  getStreamStats: () => Promise<Record<string, any>>;
 };
 
 export type StreamState =
-  | 'idle'
-  | 'connecting'
-  | 'streaming'
-  | 'stopped'
-  | 'failed'
-  | 'disconnected'
-  | 'auth_error';
+  | "idle"
+  | "connecting"
+  | "streaming"
+  | "stopped"
+  | "failed"
+  | "disconnected"
+  | "auth_error";
 
 export type LiveStreamPublisherProps = ViewProps & {
   /** RTMP URL (e.g., rtmp://server/live/stream-key) */
@@ -65,8 +89,8 @@ export type LiveStreamPublisherProps = ViewProps & {
 
 // ---- Native bindings ----
 
-const NativeView = requireNativeViewManager('ExpoLiveStream', 'PublisherView');
-const NativeModule = requireNativeModule('ExpoLiveStream');
+const NativeView = requireNativeViewManager("ExpoLiveStream", "PublisherView");
+const NativeModule = requireNativeModule("ExpoLiveStream");
 
 // ---- Default config ----
 
@@ -138,6 +162,66 @@ const ExpoLiveStreamPublisherView = forwardRef<
       toggleMute: () => {
         NativeModule.toggleMute();
       },
+      startRecording: () => {
+        return NativeModule.publisherStartRecording();
+      },
+      stopRecording: () => {
+        NativeModule.publisherStopRecording();
+      },
+      isRecording: () => {
+        return NativeModule.publisherIsRecording();
+      },
+      setZoom: (level: number) => {
+        NativeModule.publisherSetZoom(level);
+      },
+      getZoom: () => {
+        return NativeModule.publisherGetZoom();
+      },
+      getMaxZoom: () => {
+        return NativeModule.publisherGetMaxZoom();
+      },
+      setExposure: (value: number) => {
+        NativeModule.publisherSetExposure(value);
+      },
+      getExposure: () => {
+        return NativeModule.publisherGetExposure();
+      },
+      setFilter: (name: string) => {
+        NativeModule.publisherSetFilter(name);
+      },
+      getFilter: () => {
+        return NativeModule.publisherGetFilter();
+      },
+      getAvailableFilters: () => {
+        return NativeModule.publisherGetAvailableFilters();
+      },
+      // Phase 7
+      startMulti: (urls: string[]) => {
+        NativeModule.publisherStartMulti(urls);
+      },
+      stopMulti: () => {
+        NativeModule.publisherStopMulti();
+      },
+      getMultiDestinations: () => NativeModule.publisherGetMultiDestinations(),
+      // Phase 8
+      setTextOverlay: (text: string, x: number, y: number, size: number) => {
+        NativeModule.publisherSetTextOverlay(text, x, y, size);
+      },
+      clearOverlay: () => {
+        NativeModule.publisherClearOverlay();
+      },
+      // Phase 9
+      setBackgroundMusic: (path: string, volume: number) => {
+        NativeModule.publisherSetBackgroundMusic(path, volume);
+      },
+      stopBackgroundMusic: () => {
+        NativeModule.publisherStopBackgroundMusic();
+      },
+      // Phase 10
+      setAdaptiveBitrate: (enabled: boolean) => {
+        NativeModule.publisherSetAdaptiveBitrate(enabled);
+      },
+      getStreamStats: () => NativeModule.publisherGetStreamStats(),
     }));
 
     return (
@@ -155,6 +239,6 @@ const ExpoLiveStreamPublisherView = forwardRef<
   },
 );
 
-ExpoLiveStreamPublisherView.displayName = 'ExpoLiveStreamPublisherView';
+ExpoLiveStreamPublisherView.displayName = "ExpoLiveStreamPublisherView";
 
 export default ExpoLiveStreamPublisherView;

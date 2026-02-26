@@ -28,5 +28,7 @@ export {
     CameraPosition,
     StreamState as StreamStateEnum,
     PlayerState as PlayerStateEnum,
+    StreamProtocol,
+    detectProtocol,
 } from './presets';
 export type { QualityConfig } from './presets';

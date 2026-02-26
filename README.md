@@ -6,16 +6,21 @@
 [![platform - android](https://img.shields.io/badge/Android-API_24+-green?style=flat-square&logo=android)](https://developer.android.com)
 [![expo](https://img.shields.io/badge/Expo-SDK_51+-000020?style=flat-square&logo=expo)](https://expo.dev)
 
-RTMP live stream **publisher** & **player** for React Native — built as a native Expo Module.
+Multi-protocol live stream **publisher** & **player** for React Native — built as a native Expo Module.
 
-> 📹 Stream live from camera • 📺 Watch RTMP streams • ⚡ Zero bridge overhead
+> 📹 Stream live from camera • 📺 Watch RTMP/RTSP/HLS/HTTP streams • ⚡ Zero bridge overhead
 
 ---
 
 ## Features
 
 - 🎥 **RTMP Publisher** — Stream live video from device camera with full controls
-- 📺 **RTMP Player** — Watch live RTMP streams with `autoPlay` support
+- 📺 **Multi-Protocol Player** — Watch live and on-demand streams:
+  - `rtmp://` / `rtmps://` — RTMP live streams
+  - `rtsp://` / `rtsps://` — IP cameras, security systems
+  - `https://...m3u8` — HLS (YouTube, Twitch, Apple)
+  - `http://...mp4` — HTTP progressive video
+  - `srt://` — SRT low-latency streams
 - 🔐 **RTMPS** — Secure streaming over SSL/TLS (`rtmps://`)
 - 🔄 **Auto-Reconnect** — Smart reconnect at both JS (hooks) and native level
 - 📊 **Live Statistics** — Bitrate, duration, bytes sent in real-time
@@ -23,6 +28,12 @@ RTMP live stream **publisher** & **player** for React Native — built as a nati
 - 🎚️ **Quality Presets** — `VideoQuality.HD_720P`, `FHD_1080P`, etc.
 - 🪝 **React Hooks** — `useLiveStream()` and `useLiveStreamPlayer()` for reactive state
 - 📱 **Rotation Support** — Seamless video playback during device orientation changes
+- 🔍 **Camera Controls** — Zoom, exposure compensation with cross-platform sliders
+- 🎨 **Real-time Filters** — 13 GPU-accelerated filters (sepia, grayscale, beauty, cartoon, etc.)
+- 📡 **Multi-Destination** — Stream to multiple RTMP servers simultaneously (optional)
+- 📝 **Text Overlay** — Live text overlay on Android stream
+- 🎵 **Audio Mixing** — Background music API (extensible)
+- 📈 **Stream Stats** — Real-time stream analytics
 - 🍎 **iOS** — [HaishinKit 2.0](https://github.com/shogo4405/HaishinKit.swift) (publisher) + [VLCKit](https://code.videolan.org/videolan/VLCKit) (player)
 - 🤖 **Android** — [RootEncoder](https://github.com/pedroSG94/RootEncoder) (publisher) + [VLC](https://code.videolan.org/videolan/vlc-android) (player)
 - ⚡ **Expo Modules API** — Native performance, no bridge overhead
@@ -93,6 +104,22 @@ function WatchScreen() {
 }
 ```
 
+#### Multi-Protocol Examples
+
+```tsx
+// 📹 IP Camera (RTSP)
+<ExpoLiveStreamPlayerView url="rtsp://192.168.1.100:554/stream1" autoPlay />
+
+// 📺 HLS Stream (YouTube/Twitch)
+<ExpoLiveStreamPlayerView url="https://cdn.example.com/live.m3u8" autoPlay />
+
+// 🎬 HTTP Video (VOD)
+<ExpoLiveStreamPlayerView url="https://example.com/video.mp4" autoPlay />
+
+// 🔐 Secure RTMP
+<ExpoLiveStreamPlayerView url="rtmps://secure.server.com/live/key" autoPlay />
+```
+
 ---
 
 ## API Reference
@@ -114,19 +141,30 @@ function WatchScreen() {
 | `onConnectionFailed`   | `(e) => void`  | —           | Connection error callback                 |
 | `onBitrateUpdate`      | `(e) => void`  | —           | Bitrate update callback                   |
 
-**Ref methods:** `start()`, `stop()`, `switchCamera()`, `toggleFlash()`, `toggleMute()`
+**Ref methods:** `start()`, `stop()`, `switchCamera()`, `toggleFlash()`, `toggleMute()`, `startRecording(path)`, `stopRecording()`, `setZoom(level)`, `setExposure(value)`, `setFilter(name)`, `startMulti(urls)`, `stopMulti()`, `setTextOverlay(text, x, y, size)`, `clearOverlay()`, `setAdaptiveBitrate(enabled)`, `getStreamStats()`
 
 ### `<ExpoLiveStreamPlayerView />`
 
-| Prop                   | Type          | Default | Description            |
-| ---------------------- | ------------- | ------- | ---------------------- |
-| `url`                  | `string`      | —       | RTMP URL               |
-| `streamName`           | `string`      | —       | Stream name (optional) |
-| `autoPlay`             | `boolean`     | `false` | Auto-start on mount    |
-| `onPlayerStateChanged` | `(e) => void` | —       | State change callback  |
-| `onPlayerError`        | `(e) => void` | —       | Error callback         |
+| Prop                   | Type          | Default | Description                             |
+| ---------------------- | ------------- | ------- | --------------------------------------- |
+| `url`                  | `string`      | —       | Stream URL (RTMP, RTSP, HLS, HTTP, SRT) |
+| `streamName`           | `string`      | —       | Stream name (optional)                  |
+| `autoPlay`             | `boolean`     | `false` | Auto-start on mount                     |
+| `onPlayerStateChanged` | `(e) => void` | —       | State change callback                   |
+| `onPlayerError`        | `(e) => void` | —       | Error callback                          |
 
-**Ref methods:** `play()`, `stop()`, `pause()`, `resume()`
+**Ref methods:** `play()`, `stop()`, `pause()`, `resume()`, `setVolume(vol)`, `setMuted(bool)`, `seekTo(ms)`, `getPosition()`, `getDuration()`, `setRate(rate)`
+
+### Supported Protocols
+
+| Protocol | Scheme            | Use Case               | Latency |
+| -------- | ----------------- | ---------------------- | ------- |
+| RTMP     | `rtmp://`         | Live streaming         | ~1-2s   |
+| RTMPS    | `rtmps://`        | Secure live streaming  | ~1-2s   |
+| RTSP     | `rtsp://`         | IP cameras, security   | ~0.5-1s |
+| HLS      | `https://...m3u8` | YouTube, Twitch, Apple | ~5-15s  |
+| HTTP     | `http://...mp4`   | VOD playback           | Instant |
+| SRT      | `srt://`          | Low-latency broadcast  | ~0.5s   |
 
 ---
 
@@ -198,6 +236,76 @@ stream.toggleMute()   // toggle mic
   onDisconnect={stream.handleDisconnect}
   onBitrateUpdate={stream.handleBitrateUpdate}
 />
+```
+
+---
+
+### Camera Controls
+
+```tsx
+const stream = useLiveStream();
+
+// Zoom (0.0 to 1.0)
+stream.setZoom(0.5); // 50% zoom
+stream.getZoom(); // → 0.5
+stream.getMaxZoom(); // → 10 (platform-dependent)
+
+// Exposure (-1.0 to 1.0)
+stream.setExposure(-0.3); // slightly darker
+stream.getExposure(); // → -0.3
+```
+
+> Zoom and exposure auto-reset when switching camera.
+
+---
+
+### Real-time Filters
+
+13 GPU-accelerated filters on both platforms:
+
+```tsx
+stream.setFilter("sepia"); // apply sepia filter
+stream.getFilter(); // → 'sepia'
+stream.getAvailableFilters(); // → ['none', 'sepia', ...]
+stream.setFilter("none"); // remove filter
+```
+
+Available: `none`, `sepia`, `grayscale`, `negative`, `brightness`, `contrast`, `saturation`, `edge_detection`, `beauty`, `cartoon`, `glitch`, `snow`, `blur`
+
+---
+
+### Multi-Destination Streaming (Optional)
+
+```tsx
+// Register secondary destinations
+stream.startMulti([
+  "rtmp://youtube.com/live/key1",
+  "rtmp://twitch.tv/live/key2",
+]);
+
+stream.start(); // primary + secondaries connect
+stream.stop(); // all disconnect
+stream.stopMulti(); // remove secondaries
+```
+
+> If `startMulti()` is never called, behavior is identical to single-destination.
+
+---
+
+### Text Overlay (Android)
+
+```tsx
+stream.setTextOverlay("LIVE", 0.1, 0.1, 24); // text, x, y, fontSize
+stream.clearOverlay();
+```
+
+---
+
+### Stream Analytics
+
+```tsx
+const stats = await stream.getStreamStats();
+// → { isStreaming, isRecording, isFrontCamera, currentFilter, secondaryDestinations }
 ```
 
 #### `useLiveStreamPlayer(options?)`

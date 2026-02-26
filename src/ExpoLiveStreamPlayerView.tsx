@@ -1,14 +1,14 @@
 import {
   requireNativeViewManager,
   requireNativeModule,
-} from 'expo-modules-core';
+} from "expo-modules-core";
 import React, {
   forwardRef,
   useImperativeHandle,
   useRef,
   useEffect,
-} from 'react';
-import { ViewProps } from 'react-native';
+} from "react";
+import { ViewProps } from "react-native";
 
 // ---- Types ----
 
@@ -17,19 +17,32 @@ export type LiveStreamPlayerRef = {
   stop: () => void;
   pause: () => void;
   resume: () => void;
+  setVolume: (volume: number) => void;
+  setMuted: (muted: boolean) => void;
+  seekTo: (positionMs: number) => void;
+  getPosition: () => Promise<number>;
+  getDuration: () => Promise<number>;
+  setRate: (rate: number) => void;
 };
 
 export type PlayerState =
-  | 'idle'
-  | 'connecting'
-  | 'buffering'
-  | 'playing'
-  | 'paused'
-  | 'stopped'
-  | 'failed';
+  | "idle"
+  | "connecting"
+  | "buffering"
+  | "playing"
+  | "paused"
+  | "stopped"
+  | "failed";
 
 export type LiveStreamPlayerProps = ViewProps & {
-  /** RTMP URL (e.g., rtmp://server/app/stream-key) */
+  /**
+   * Stream URL — supports multiple protocols:
+   * - `rtmp://` / `rtmps://` — RTMP live stream
+   * - `rtsp://` / `rtsps://` — IP cameras, security systems
+   * - `https://...m3u8` — HLS (YouTube, Twitch)
+   * - `http://...mp4` — HTTP progressive video
+   * - `srt://` — SRT low-latency stream
+   */
   url?: string;
   /** Stream name to subscribe to (optional, can be part of URL) */
   streamName?: string;
@@ -45,8 +58,8 @@ export type LiveStreamPlayerProps = ViewProps & {
 
 // ---- Native bindings ----
 
-const NativeView = requireNativeViewManager('ExpoLiveStream', 'PlayerView');
-const NativeModule = requireNativeModule('ExpoLiveStream');
+const NativeView = requireNativeViewManager("ExpoLiveStream", "PlayerView");
+const NativeModule = requireNativeModule("ExpoLiveStream");
 
 // ---- No-op handler (Fabric requires all events to be registered) ----
 const noop = () => {};
@@ -77,6 +90,24 @@ const ExpoLiveStreamPlayerView = forwardRef<
       resume: () => {
         NativeModule.playerResume();
       },
+      setVolume: (volume: number) => {
+        NativeModule.playerSetVolume(volume);
+      },
+      setMuted: (muted: boolean) => {
+        NativeModule.playerSetMuted(muted);
+      },
+      seekTo: (positionMs: number) => {
+        NativeModule.playerSeekTo(positionMs);
+      },
+      getPosition: () => {
+        return NativeModule.playerGetPosition();
+      },
+      getDuration: () => {
+        return NativeModule.playerGetDuration();
+      },
+      setRate: (rate: number) => {
+        NativeModule.playerSetRate(rate);
+      },
     }));
 
     // Auto-play support
@@ -101,6 +132,6 @@ const ExpoLiveStreamPlayerView = forwardRef<
   },
 );
 
-ExpoLiveStreamPlayerView.displayName = 'ExpoLiveStreamPlayerView';
+ExpoLiveStreamPlayerView.displayName = "ExpoLiveStreamPlayerView";
 
 export default ExpoLiveStreamPlayerView;

@@ -94,6 +94,43 @@ export interface UseLiveStreamReturn {
     toggleFlash: () => void;
     /** Toggle microphone mute */
     toggleMute: () => void;
+    /** Start recording locally (returns file path) */
+    startRecording: () => Promise<string>;
+    /** Stop recording */
+    stopRecording: () => void;
+    /** Whether currently recording */
+    isRecording: boolean;
+    /** Path of the current/last recording */
+    recordingPath: string | null;
+    /** Set zoom level (0.0 = no zoom, 1.0 = max zoom) */
+    setZoom: (level: number) => void;
+    /** Get current zoom level (0.0-1.0) */
+    getZoom: () => Promise<number>;
+    /** Get maximum zoom factor */
+    getMaxZoom: () => Promise<number>;
+    /** Set exposure compensation (-1.0 to 1.0) */
+    setExposure: (value: number) => void;
+    /** Get current exposure compensation */
+    getExposure: () => Promise<number>;
+    /** Set video filter by name */
+    setFilter: (name: string) => void;
+    /** Get current filter name */
+    getFilter: () => Promise<string>;
+    /** Get list of available filter names */
+    getAvailableFilters: () => Promise<string[]>;
+    // Phase 7: Multi-Destination
+    startMulti: (urls: string[]) => void;
+    stopMulti: () => void;
+    getMultiDestinations: () => Promise<string[]>;
+    // Phase 8: Overlay
+    setTextOverlay: (text: string, x: number, y: number, size: number) => void;
+    clearOverlay: () => void;
+    // Phase 9: Audio
+    setBackgroundMusic: (path: string, volume: number) => void;
+    stopBackgroundMusic: () => void;
+    // Phase 10: Advanced
+    setAdaptiveBitrate: (enabled: boolean) => void;
+    getStreamStats: () => Promise<Record<string, any>>;
     /** Clear current error */
     clearError: () => void;
 
@@ -162,6 +199,10 @@ export function useLiveStream(options: UseLiveStreamOptions = {}): UseLiveStream
     const durationTimerRef = useRef<any>(null);
     const streamStartTimeRef = useRef<number>(0);
     const wasStreamingRef = useRef(false);
+
+    // Recording state
+    const [isRecordingState, setIsRecordingState] = useState(false);
+    const [recordingPath, setRecordingPath] = useState<string | null>(null);
 
     const isStreaming = state === 'streaming';
     const isConnecting = state === 'connecting';
@@ -325,6 +366,39 @@ export function useLiveStream(options: UseLiveStreamOptions = {}): UseLiveStream
         switchCamera,
         toggleFlash,
         toggleMute,
+        startRecording: async () => {
+            const path = await ref.current?.startRecording() ?? '';
+            setRecordingPath(path);
+            setIsRecordingState(true);
+            return path;
+        },
+        stopRecording: () => {
+            ref.current?.stopRecording();
+            setIsRecordingState(false);
+        },
+        isRecording: isRecordingState,
+        recordingPath,
+        setZoom: (level: number) => { ref.current?.setZoom(level); },
+        getZoom: () => ref.current?.getZoom() ?? Promise.resolve(0),
+        getMaxZoom: () => ref.current?.getMaxZoom() ?? Promise.resolve(1),
+        setExposure: (value: number) => { ref.current?.setExposure(value); },
+        getExposure: () => ref.current?.getExposure() ?? Promise.resolve(0),
+        setFilter: (name: string) => { ref.current?.setFilter(name); },
+        getFilter: () => ref.current?.getFilter() ?? Promise.resolve('none'),
+        getAvailableFilters: () => ref.current?.getAvailableFilters() ?? Promise.resolve([]),
+        // Phase 7
+        startMulti: (urls: string[]) => { ref.current?.startMulti(urls); },
+        stopMulti: () => { ref.current?.stopMulti(); },
+        getMultiDestinations: () => ref.current?.getMultiDestinations() ?? Promise.resolve([]),
+        // Phase 8
+        setTextOverlay: (text: string, x: number, y: number, size: number) => { ref.current?.setTextOverlay(text, x, y, size); },
+        clearOverlay: () => { ref.current?.clearOverlay(); },
+        // Phase 9
+        setBackgroundMusic: (path: string, volume: number) => { ref.current?.setBackgroundMusic(path, volume); },
+        stopBackgroundMusic: () => { ref.current?.stopBackgroundMusic(); },
+        // Phase 10
+        setAdaptiveBitrate: (enabled: boolean) => { ref.current?.setAdaptiveBitrate(enabled); },
+        getStreamStats: () => ref.current?.getStreamStats() ?? Promise.resolve({}),
         clearError,
         handleStreamStateChanged,
         handleConnectionFailed,
@@ -377,6 +451,18 @@ export interface UseLiveStreamPlayerReturn {
     pause: () => void;
     /** Resume playback */
     resume: () => void;
+    /** Set volume (0.0 – 1.0) */
+    setVolume: (volume: number) => void;
+    /** Mute/unmute audio */
+    setMuted: (muted: boolean) => void;
+    /** Seek to position in ms (VOD only) */
+    seekTo: (positionMs: number) => void;
+    /** Get current position in ms */
+    getPosition: () => Promise<number>;
+    /** Get total duration in ms (0 for live) */
+    getDuration: () => Promise<number>;
+    /** Set playback speed (1.0 = normal, 2.0 = 2x) */
+    setRate: (rate: number) => void;
     /** Clear error */
     clearError: () => void;
 
@@ -440,6 +526,12 @@ export function useLiveStreamPlayer(
 
     const pause = useCallback(() => ref.current?.pause(), []);
     const resume = useCallback(() => ref.current?.resume(), []);
+    const setVolume = useCallback((volume: number) => ref.current?.setVolume(volume), []);
+    const setMuted = useCallback((muted: boolean) => ref.current?.setMuted(muted), []);
+    const seekTo = useCallback((positionMs: number) => ref.current?.seekTo(positionMs), []);
+    const getPosition = useCallback((): Promise<number> => ref.current?.getPosition() ?? Promise.resolve(0), []);
+    const getDuration = useCallback((): Promise<number> => ref.current?.getDuration() ?? Promise.resolve(0), []);
+    const setRate = useCallback((rate: number) => ref.current?.setRate(rate), []);
     const clearError = useCallback(() => setError(null), []);
 
     // ── Auto-reconnect ──
@@ -523,6 +615,12 @@ export function useLiveStreamPlayer(
         stop,
         pause,
         resume,
+        setVolume,
+        setMuted,
+        seekTo,
+        getPosition,
+        getDuration,
+        setRate,
         clearError,
         handlePlayerStateChanged,
         handlePlayerError,
