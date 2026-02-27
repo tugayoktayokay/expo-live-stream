@@ -41,7 +41,8 @@
     "build",
     "src",
     "ios",
-    "android",
+    "android/src",
+    "android/build.gradle",
     "expo-module.config.json"
   ],
   "devDependencies": {

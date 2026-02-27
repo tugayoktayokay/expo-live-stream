@@ -1,11 +1,8 @@
 # Dependencies
 node_modules/
-.expo/
 
 # Build output
 build/
-classes.jar
-rtmp_tmp/
 
 # Android
 android/build/

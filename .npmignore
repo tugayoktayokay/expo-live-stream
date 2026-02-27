@@ -1,0 +1,17 @@
+# Example app
+example/
+
+# Android build artifacts
+android/build/
+android/.gradle/
+
+# iOS build artifacts
+ios/build/
+ios/Pods/
+
+# Dev files
+.expo/
+.git/
+.idea/
+.vscode/
+*.tsbuildinfo
