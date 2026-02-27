@@ -7,7 +7,6 @@ import android.util.Log
 
 import androidx.core.content.ContextCompat
 import com.pedro.common.ConnectChecker
-import com.pedro.encoder.utils.CodecUtil
 import com.pedro.library.rtmp.RtmpCamera2
 import com.pedro.library.view.OpenGlView
 import expo.modules.kotlin.AppContext
@@ -55,6 +54,8 @@ class PublisherView(
   private var isSurfaceReady = false
   private var isCameraInitialized = false
   private var isSwitchingCamera = false
+  private var isBouncing = false
+  private var isBackgrounding = false
   private var lastStreamUrl: String? = null
   private var wasStreamingBeforeBackground = false
 
@@ -69,6 +70,7 @@ class PublisherView(
     if (!hasWindowFocus) {
       Log.d(TAG, "Window lost focus (background)")
       wasStreamingBeforeBackground = isStreaming
+      isBackgrounding = true // Suppress RTMP onDisconnect callback
       try {
         val camera = rtmpCamera ?: return
         if (isStreaming) { camera.stopStream(); isStreaming = false }
@@ -77,14 +79,34 @@ class PublisherView(
       } catch (e: Exception) { Log.w(TAG, "Error on background", e) }
     } else {
       Log.d(TAG, "Window gained focus (foreground)")
+      isBackgrounding = false
+      val shouldResume = wasStreamingBeforeBackground
+      wasStreamingBeforeBackground = false
+
       if (!isCameraInitialized && isSurfaceReady) {
-        post { try { reinitCamera() } catch (e: Exception) { Log.e(TAG, "Error on foreground", e) } }
-      }
-      if (wasStreamingBeforeBackground) {
-        wasStreamingBeforeBackground = false
         post {
-          onStreamStateChanged(mapOf("state" to "stopped"))
-          onDisconnect(emptyMap<String, Any>())
+          try {
+            reinitCamera()
+            // Resume stream after camera is ready
+            if (shouldResume && !lastStreamUrl.isNullOrEmpty()) {
+              Log.d(TAG, "Resuming stream after background return")
+              postDelayed({
+                start(lastStreamUrl)
+              }, 300)
+            }
+          } catch (e: Exception) {
+            Log.e(TAG, "Error on foreground", e)
+            if (shouldResume) {
+              onStreamStateChanged(mapOf("state" to "failed"))
+              onConnectionFailed(mapOf("msg" to "Failed to resume after background"))
+            }
+          }
+        }
+      } else if (shouldResume && !lastStreamUrl.isNullOrEmpty()) {
+        // Camera already initialized, just restart stream
+        post {
+          Log.d(TAG, "Resuming stream (camera already ready)")
+          start(lastStreamUrl)
         }
       }
     }
@@ -95,7 +117,7 @@ class PublisherView(
     val rotation = com.pedro.encoder.input.video.CameraHelper.getCameraOrientation(context)
     val lw = maxOf(videoWidth, videoHeight)
     val lh = minOf(videoWidth, videoHeight)
-    camera.prepareVideo(lw, lh, videoFps, videoBitrate, rotation)
+    camera.prepareVideo(lw, lh, videoFps, videoBitrate, 1, rotation)
     camera.prepareAudio(audioBitrate, audioSampleRate, false)
     val facing = if (isFrontCamera)
       com.pedro.encoder.input.video.CameraHelper.Facing.FRONT
@@ -128,15 +150,12 @@ class PublisherView(
     try {
       Log.d(TAG, "Creating RtmpCamera2...")
       val camera = RtmpCamera2(glView, this)
-      
-      // Default hardware codec for fluid preview. 
-      // iFrameInterval=1 and requestKeyFrame will handle VLC freezing.      
       rtmpCamera = camera
 
       val rotation = com.pedro.encoder.input.video.CameraHelper.getCameraOrientation(context)
       val lw = maxOf(videoWidth, videoHeight)
       val lh = minOf(videoWidth, videoHeight)
-      
+
       Log.d(TAG, "prepareVideo: ${lw}x${lh} @ ${videoBitrate}bps, rotation=$rotation")
       // iFrameInterval=1 for quick keyframe recovery
       val videoPrepared = camera.prepareVideo(lw, lh, videoFps, videoBitrate, 1, rotation)
@@ -149,7 +168,7 @@ class PublisherView(
         com.pedro.encoder.input.video.CameraHelper.Facing.BACK
       camera.startPreview(facing)
       isCameraInitialized = true
-      Log.d(TAG, "Camera initialized with SOFTWARE codec")
+      Log.d(TAG, "Camera initialized")
     } catch (e: Exception) {
       Log.e(TAG, "Failed to init camera", e)
       isCameraInitialized = false
@@ -216,9 +235,24 @@ class PublisherView(
       val camera = rtmpCamera ?: return@post
       if (isSwitchingCamera) { Log.d(TAG, "switchCamera: in progress"); return@post }
       isSwitchingCamera = true
+      
+      val switchingToFront = !isFrontCamera
+      val wasStreaming = isStreaming
+      val manufacturer = android.os.Build.MANUFACTURER.lowercase()
+      val needsBounce = switchingToFront && wasStreaming &&
+              (manufacturer.contains("samsung") || manufacturer.contains("xiaomi"))
 
       try {
-        Log.d(TAG, "switchCamera: frontCamera=$isFrontCamera, streaming=$isStreaming")
+        Log.d(TAG, "switchCamera: frontCamera=$isFrontCamera→$switchingToFront, streaming=$isStreaming, bounce=$needsBounce")
+
+        // Samsung/Xiaomi back→front: stop stream before switching to prevent encoder freeze
+        if (needsBounce) {
+          isBouncing = true
+          try { camera.stopStream() } catch (_: Exception) {}
+          isStreaming = false
+          Log.d(TAG, "switchCamera: stream paused for bounce")
+        }
+
         camera.switchCamera()
         isFrontCamera = !isFrontCamera
 
@@ -227,28 +261,45 @@ class PublisherView(
           isFlashOn = false
         }
 
-        // Force keyframes — software codec should honor this properly
-        if (isStreaming) {
+        if (needsBounce && !lastStreamUrl.isNullOrEmpty()) {
+          // Re-prepare encoder and restart stream after delay
           postDelayed({
             try {
-              camera.requestKeyFrame()
-              Log.d(TAG, "switchCamera: keyframe requested at 200ms")
-            } catch (e: Exception) { Log.w(TAG, "requestKeyFrame 200ms failed: ${e.message}") }
-          }, 200)
-          postDelayed({
-            try {
-              camera.requestKeyFrame()
-              Log.d(TAG, "switchCamera: keyframe requested at 1s")
-            } catch (e: Exception) { Log.w(TAG, "requestKeyFrame 1s failed: ${e.message}") }
-          }, 1000)
+              val rotation = com.pedro.encoder.input.video.CameraHelper.getCameraOrientation(context)
+              val lw = maxOf(videoWidth, videoHeight)
+              val lh = minOf(videoWidth, videoHeight)
+              camera.prepareVideo(lw, lh, videoFps, videoBitrate, 1, rotation)
+              camera.prepareAudio(audioBitrate, audioSampleRate, false)
+
+              camera.startStream(lastStreamUrl!!)
+              isStreaming = true
+              if (isMuted) { camera.disableAudio() }
+              Log.d(TAG, "switchCamera: stream resumed after bounce")
+              isBouncing = false
+
+              postDelayed({ try { camera.requestKeyFrame() } catch (_: Exception) {} }, 200)
+              onStreamStateChanged(mapOf("state" to "streaming"))
+            } catch (e: Exception) {
+              Log.e(TAG, "switchCamera: bounce resume failed", e)
+              isBouncing = false
+              onStreamStateChanged(mapOf("state" to "failed"))
+            }
+            isSwitchingCamera = false
+          }, 300)
+        } else {
+          // Normal switch (front→back or non-problematic device)
+          if (isStreaming) {
+            postDelayed({ try { camera.requestKeyFrame() } catch (_: Exception) {} }, 200)
+            postDelayed({ try { camera.requestKeyFrame() } catch (_: Exception) {} }, 500)
+          }
+          postDelayed({ isSwitchingCamera = false }, 800)
         }
 
         Log.d(TAG, "switchCamera: success, frontCamera=$isFrontCamera")
       } catch (e: Exception) {
         Log.e(TAG, "switchCamera failed", e)
+        postDelayed({ isSwitchingCamera = false }, 1500)
       }
-
-      postDelayed({ isSwitchingCamera = false }, 1500)
     }
   }
 
@@ -277,12 +328,14 @@ class PublisherView(
 
   // ConnectChecker callbacks
   override fun onConnectionStarted(url: String) {
-    Log.d(TAG, "onConnectionStarted: $url")
-    post { onStreamStateChanged(mapOf("state" to "connecting")) }
+    Log.d(TAG, "onConnectionStarted: $url (bouncing=$isBouncing)")
+    if (!isBouncing) {
+      post { onStreamStateChanged(mapOf("state" to "connecting")) }
+    }
   }
 
   override fun onConnectionSuccess() {
-    Log.d(TAG, "onConnectionSuccess")
+    Log.d(TAG, "onConnectionSuccess (bouncing=$isBouncing)")
     post {
       onConnectionSuccess(emptyMap<String, Any>())
       onStreamStateChanged(mapOf("state" to "streaming"))
@@ -303,7 +356,8 @@ class PublisherView(
   }
 
   override fun onDisconnect() {
-    Log.d(TAG, "onDisconnect")
+    Log.d(TAG, "onDisconnect (bouncing=$isBouncing, backgrounding=$isBackgrounding)")
+    if (isBouncing || isBackgrounding) return // Suppress during camera switch bounce or background transition
     post {
       isStreaming = false
       onDisconnect(emptyMap<String, Any>())

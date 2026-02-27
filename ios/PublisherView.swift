@@ -39,12 +39,15 @@ class PublisherView: ExpoView {
   private var isFlashOn = false
   private var isSwitchingCamera = false
   private var bitrateTimer: Timer?
+  private var wasStreamingBeforeBackground = false
+  private var lastStreamUrl: String?
 
   // MARK: - Init
   required public init(appContext: AppContext? = nil) {
     super.init(appContext: appContext)
     PublisherView.activeInstance = self
     setupStream()
+    setupLifecycleObservers()
   }
 
   override init(frame: CGRect) {
@@ -64,6 +67,81 @@ class PublisherView: ExpoView {
       startPreview()
     }
     updateMirror()
+  }
+
+  private func setupLifecycleObservers() {
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(appWillResignActive),
+      name: UIApplication.willResignActiveNotification,
+      object: nil
+    )
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(appDidBecomeActive),
+      name: UIApplication.didBecomeActiveNotification,
+      object: nil
+    )
+  }
+
+  @objc private func appWillResignActive() {
+    print("[ExpoLiveStream] App going to background")
+    wasStreamingBeforeBackground = isStreaming
+    if isStreaming {
+      isStreaming = false
+      stopBitrateTimer()
+      Task {
+        _ = try? await stream?.close()
+        _ = try? await connection?.close()
+      }
+    }
+    // Detach camera (iOS requires this in background)
+    if let mixer = mixer {
+      Task {
+        try? await mixer.attachVideo(nil)
+      }
+    }
+  }
+
+  @objc private func appDidBecomeActive() {
+    print("[ExpoLiveStream] App returning to foreground")
+    // Reattach camera
+    let position: AVCaptureDevice.Position = isFrontCamera ? .front : .back
+    let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
+
+    if let mixer = mixer {
+      Task {
+        do {
+          try await mixer.attachVideo(camera)
+        } catch {
+          print("[ExpoLiveStream] Camera reattach error: \(error)")
+        }
+
+        // Resume stream if it was active before background
+        if self.wasStreamingBeforeBackground {
+          self.wasStreamingBeforeBackground = false
+          await MainActor.run {
+            print("[ExpoLiveStream] Resuming stream after background")
+            // Re-setup connection and stream
+            let conn = RTMPConnection()
+            self.connection = conn
+            self.stream = RTMPStream(connection: conn)
+
+            if let stream = self.stream, let preview = self.hkView {
+              Task {
+                await mixer.addOutput(stream)
+                await mixer.addOutput(preview)
+                // Small delay to let camera stabilize, then start
+                try? await Task.sleep(nanoseconds: 300_000_000) // 300ms
+                await MainActor.run {
+                  self.start(urlOverride: self.lastStreamUrl)
+                }
+              }
+            }
+          }
+        }
+      }
+    }
   }
 
   // MARK: - Mirror
@@ -155,6 +233,7 @@ class PublisherView: ExpoView {
     }
 
     isStreaming = true
+    lastStreamUrl = targetUrl
     onStreamStateChanged(["state": "connecting"])
 
     Task {
@@ -328,6 +407,7 @@ class PublisherView: ExpoView {
 
   // MARK: - Cleanup
   deinit {
+    NotificationCenter.default.removeObserver(self)
     bitrateTimer?.invalidate()
     if isStreaming {
       let stream = self.stream

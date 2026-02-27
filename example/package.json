@@ -1,0 +1,21 @@
+{
+  "name": "expo-live-stream-example",
+  "version": "1.0.0",
+  "private": true,
+  "main": "node_modules/expo/AppEntry.js",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios"
+  },
+  "dependencies": {
+    "expo": "~54.0.0",
+    "react": "^19.1.0",
+    "react-native": "0.81.5",
+    "expo-live-stream": "../"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.24.0",
+    "typescript": "~5.3.3"
+  }
+}

@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+
+# Android
+android/build/
+android/.gradle/
+android/app/build/
+android/local.properties
+
+# iOS
+ios/build/
+ios/Pods/
+*.xcworkspace
+*.xcuserdata
+
+# OS
+.DS_Store
+
+# Metro
+*.jsbundle
