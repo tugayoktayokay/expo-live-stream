@@ -53,5 +53,8 @@
     "expo": "*",
     "react": "*",
     "react-native": "*"
+  },
+  "dependencies": {
+    "babel-plugin-react-compiler": "^19.0.0-beta-ebf51a3-20250411"
   }
 }
