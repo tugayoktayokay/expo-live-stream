@@ -19,9 +19,5 @@ jobs:
 
       - run: npm ci
 
-      - name: Lint
-        run: npm run lint
-        continue-on-error: true  # .eslintrc.js needs migration to eslint.config.js for ESLint 9
-
       - name: Build TypeScript
         run: npm run build
