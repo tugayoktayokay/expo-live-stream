@@ -34,7 +34,7 @@ PODS:
     - ExpoModulesCore
   - ExpoKeepAwake (15.0.8):
     - ExpoModulesCore
-  - ExpoLiveStream (1.1.0):
+  - ExpoLiveStream (1.3.0):
     - ExpoModulesCore
     - HaishinKit (~> 2.0)
     - MobileVLCKit (~> 3.6.0)
@@ -1944,7 +1944,7 @@ SPEC CHECKSUMS:
   ExpoFileSystem: 858a44267a3e6e9057e0888ad7c7cfbf55d52063
   ExpoFont: f543ce20a228dd702813668b1a07b46f51878d47
   ExpoKeepAwake: 55f75eca6499bb9e4231ebad6f3e9cb8f99c0296
-  ExpoLiveStream: b11803a2f3a8cc42b990027a78c0f1c57b5a17de
+  ExpoLiveStream: 69e414ea73b0251fff5ecd9fc06ca32330196323
   ExpoModulesCore: f3da4f1ab5a8375d0beafab763739dbee8446583
   FBLazyVector: e95a291ad2dadb88e42b06e0c5fb8262de53ec12
   HaishinKit: add48c1321b98351e38498fe869efee230c92d05
