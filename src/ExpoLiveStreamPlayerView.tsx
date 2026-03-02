@@ -1,14 +1,14 @@
 import {
   requireNativeViewManager,
   requireNativeModule,
-} from 'expo-modules-core';
+} from "expo-modules-core";
 import React, {
   forwardRef,
   useImperativeHandle,
   useRef,
   useEffect,
-} from 'react';
-import { ViewProps } from 'react-native';
+} from "react";
+import { ViewProps } from "react-native";
 
 // ---- Types ----
 
@@ -20,13 +20,13 @@ export type LiveStreamPlayerRef = {
 };
 
 export type PlayerState =
-  | 'idle'
-  | 'connecting'
-  | 'buffering'
-  | 'playing'
-  | 'paused'
-  | 'stopped'
-  | 'failed';
+  | "idle"
+  | "connecting"
+  | "buffering"
+  | "playing"
+  | "paused"
+  | "stopped"
+  | "failed";
 
 export type LiveStreamPlayerProps = ViewProps & {
   /** RTMP URL (e.g., rtmp://server/app/stream-key) */
@@ -45,8 +45,8 @@ export type LiveStreamPlayerProps = ViewProps & {
 
 // ---- Native bindings ----
 
-const NativeView = requireNativeViewManager('ExpoLiveStream', 'PlayerView');
-const NativeModule = requireNativeModule('ExpoLiveStream');
+const NativeView = requireNativeViewManager("ExpoLiveStreamPlayer");
+const NativeModule = requireNativeModule("ExpoLiveStreamPlayer");
 
 // ---- No-op handler (Fabric requires all events to be registered) ----
 const noop = () => {};
@@ -101,6 +101,6 @@ const ExpoLiveStreamPlayerView = forwardRef<
   },
 );
 
-ExpoLiveStreamPlayerView.displayName = 'ExpoLiveStreamPlayerView';
+ExpoLiveStreamPlayerView.displayName = "ExpoLiveStreamPlayerView";
 
 export default ExpoLiveStreamPlayerView;

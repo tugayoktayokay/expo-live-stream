@@ -35,31 +35,6 @@ public class ExpoLiveStreamModule: Module {
       }
     }
 
-    // ======== Player Functions ========
-    AsyncFunction("playerPlay") {
-      await MainActor.run {
-        PlayerView.activeInstance?.play()
-      }
-    }
-
-    AsyncFunction("playerStop") {
-      await MainActor.run {
-        PlayerView.activeInstance?.stop()
-      }
-    }
-
-    AsyncFunction("playerPause") {
-      await MainActor.run {
-        PlayerView.activeInstance?.pause()
-      }
-    }
-
-    AsyncFunction("playerResume") {
-      await MainActor.run {
-        PlayerView.activeInstance?.resume()
-      }
-    }
-
     // ======== Publisher View ========
     View(PublisherView.self) {
       Events(
@@ -96,21 +71,6 @@ public class ExpoLiveStreamModule: Module {
       }
       Prop("frontCamera") { (view: PublisherView, front: Bool) in
         view.isFrontCamera = front
-      }
-    }
-
-    // ======== Player View ========
-    View(PlayerView.self) {
-      Events(
-        "onPlayerStateChanged",
-        "onPlayerError"
-      )
-
-      Prop("url") { (view: PlayerView, url: String) in
-        view.url = url
-      }
-      Prop("streamName") { (view: PlayerView, name: String) in
-        view.streamName = name
       }
     }
   }

@@ -1,10 +1,10 @@
 import {
   requireNativeViewManager,
   requireNativeModule,
-} from 'expo-modules-core';
-import React, { forwardRef, useImperativeHandle, useRef, useMemo } from 'react';
-import { ViewProps } from 'react-native';
-import { VideoQuality, QualityPresets, QualityConfig } from './presets';
+} from "expo-modules-core";
+import React, { forwardRef, useImperativeHandle, useRef, useMemo } from "react";
+import { ViewProps } from "react-native";
+import { VideoQuality, QualityPresets, QualityConfig } from "./presets";
 
 // ---- Types ----
 
@@ -17,13 +17,13 @@ export type LiveStreamPublisherRef = {
 };
 
 export type StreamState =
-  | 'idle'
-  | 'connecting'
-  | 'streaming'
-  | 'stopped'
-  | 'failed'
-  | 'disconnected'
-  | 'auth_error';
+  | "idle"
+  | "connecting"
+  | "streaming"
+  | "stopped"
+  | "failed"
+  | "disconnected"
+  | "auth_error";
 
 export type LiveStreamPublisherProps = ViewProps & {
   /** RTMP URL (e.g., rtmp://server/live/stream-key) */
@@ -65,8 +65,8 @@ export type LiveStreamPublisherProps = ViewProps & {
 
 // ---- Native bindings ----
 
-const NativeView = requireNativeViewManager('ExpoLiveStream', 'PublisherView');
-const NativeModule = requireNativeModule('ExpoLiveStream');
+const NativeView = requireNativeViewManager("ExpoLiveStream");
+const NativeModule = requireNativeModule("ExpoLiveStream");
 
 // ---- Default config ----
 
@@ -155,6 +155,6 @@ const ExpoLiveStreamPublisherView = forwardRef<
   },
 );
 
-ExpoLiveStreamPublisherView.displayName = 'ExpoLiveStreamPublisherView';
+ExpoLiveStreamPublisherView.displayName = "ExpoLiveStreamPublisherView";
 
 export default ExpoLiveStreamPublisherView;

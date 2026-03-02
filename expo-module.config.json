@@ -1,9 +1,12 @@
 {
   "platforms": ["apple", "android"],
   "apple": {
-    "modules": ["ExpoLiveStreamModule"]
+    "modules": ["ExpoLiveStreamModule", "ExpoLiveStreamPlayerModule"]
   },
   "android": {
-    "modules": ["expo.modules.livestream.ExpoLiveStreamModule"]
+    "modules": [
+      "expo.modules.livestream.ExpoLiveStreamModule",
+      "expo.modules.livestream.ExpoLiveStreamPlayerModule"
+    ]
   }
 }
