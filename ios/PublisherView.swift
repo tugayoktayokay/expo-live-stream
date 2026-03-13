@@ -6,6 +6,9 @@ import VideoToolbox
 class PublisherView: ExpoView {
 
   // MARK: - Active Instance tracking
+  /// Singleton reference — only one publisher can be active at a time.
+  /// This is intentional: live streaming uses a single camera source.
+  /// The instance is set on init and cleared on removeFromSuperview.
   static weak var activeInstance: PublisherView?
 
   // MARK: - RTMP objects
@@ -41,6 +44,7 @@ class PublisherView: ExpoView {
   private var bitrateTimer: Timer?
   private var wasStreamingBeforeBackground = false
   private var lastStreamUrl: String?
+  private var lastMirrorFront: Bool?
 
   // MARK: - Init
   required public init(appContext: AppContext? = nil) {
@@ -101,34 +105,39 @@ class PublisherView: ExpoView {
 
   @objc private func appDidBecomeActive() {
     print("[ExpoLiveStream] App returning to foreground")
-    // Reattach camera
     let position: AVCaptureDevice.Position = isFrontCamera ? .front : .back
     let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
 
     if let mixer = mixer {
+      let oldStream = self.stream
+
       Task {
+        _ = try? await oldStream?.close()
+        _ = try? await self.connection?.close()
+
+        // Remove stale stream output before creating a new one
+        if let old = oldStream {
+          await mixer.removeOutput(old)
+        }
+
         do {
           try await mixer.attachVideo(camera)
         } catch {
           print("[ExpoLiveStream] Camera reattach error: \(error)")
         }
 
-        // Resume stream if it was active before background
         if self.wasStreamingBeforeBackground {
           self.wasStreamingBeforeBackground = false
           await MainActor.run {
             print("[ExpoLiveStream] Resuming stream after background")
-            // Re-setup connection and stream
             let conn = RTMPConnection()
             self.connection = conn
             self.stream = RTMPStream(connection: conn)
 
-            if let stream = self.stream, let preview = self.hkView {
+            if let stream = self.stream {
               Task {
                 await mixer.addOutput(stream)
-                await mixer.addOutput(preview)
-                // Small delay to let camera stabilize, then start
-                try? await Task.sleep(nanoseconds: 300_000_000) // 300ms
+                try? await Task.sleep(nanoseconds: 300_000_000)
                 await MainActor.run {
                   self.start(urlOverride: self.lastStreamUrl)
                 }
@@ -142,6 +151,8 @@ class PublisherView: ExpoView {
 
   // MARK: - Mirror
   private func updateMirror() {
+    guard lastMirrorFront != isFrontCamera else { return }
+    lastMirrorFront = isFrontCamera
     if isFrontCamera {
       hkView?.transform = CGAffineTransform(scaleX: -1, y: 1)
     } else {
@@ -270,23 +281,28 @@ class PublisherView: ExpoView {
     isStreaming = false
     stopBitrateTimer()
 
+    let oldStream = self.stream
+
     Task {
-      _ = try? await stream?.close()
-      _ = try? await connection?.close()
+      _ = try? await oldStream?.close()
+      _ = try? await self.connection?.close()
+
+      // Remove stale outputs before creating new ones
+      if let mixer = self.mixer, let old = oldStream {
+        await mixer.removeOutput(old)
+      }
+
       await MainActor.run {
         self.onDisconnect([:])
         self.onStreamStateChanged(["state": "stopped"])
 
-        // Re-setup connection and stream for next use
         let conn = RTMPConnection()
         self.connection = conn
         self.stream = RTMPStream(connection: conn)
 
-        // Re-attach stream to mixer/preview
-        if let mixer = self.mixer, let stream = self.stream, let preview = self.hkView {
+        if let mixer = self.mixer, let stream = self.stream {
           Task {
             await mixer.addOutput(stream)
-            await mixer.addOutput(preview)
           }
         }
       }

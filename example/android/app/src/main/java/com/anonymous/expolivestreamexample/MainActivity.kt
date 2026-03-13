@@ -1,4 +1,4 @@
-package com.anonymous.livestreamtest
+package com.anonymous.expolivestreamexample
 
 import android.os.Build
 import android.os.Bundle

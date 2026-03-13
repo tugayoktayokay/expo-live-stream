@@ -9,23 +9,23 @@ class ExpoLiveStreamModule : Module() {
 
     // ======== Publisher Functions ========
     AsyncFunction("start") { url: String? ->
-      PublisherView.activeInstance?.start(url)
+      PublisherView.activeInstance?.let { view -> view.post { view.start(url) } }
     }
 
     AsyncFunction("stop") {
-      PublisherView.activeInstance?.stop()
+      PublisherView.activeInstance?.let { view -> view.post { view.stop() } }
     }
 
     AsyncFunction("switchCamera") {
-      PublisherView.activeInstance?.switchCamera()
+      PublisherView.activeInstance?.let { view -> view.post { view.switchCamera() } }
     }
 
     AsyncFunction("toggleFlash") {
-      PublisherView.activeInstance?.toggleFlash()
+      PublisherView.activeInstance?.let { view -> view.post { view.toggleFlash() } }
     }
 
     AsyncFunction("toggleMute") {
-      PublisherView.activeInstance?.toggleMute()
+      PublisherView.activeInstance?.let { view -> view.post { view.toggleMute() } }
     }
 
     // ======== Publisher View ========

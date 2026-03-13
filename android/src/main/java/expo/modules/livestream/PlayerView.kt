@@ -21,6 +21,11 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
 
   companion object {
     private const val TAG = "ExpoLiveStreamPlayer"
+    /**
+     * Singleton reference — only one player view can be active at a time.
+     * This is intentional for live stream playback (one viewer per screen).
+     * The instance is set on init and cleared on detach/cleanup.
+     */
     var activeInstance: PlayerView? = null
       private set
   }
@@ -69,6 +74,17 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
           Log.d(TAG, "TextureView surface available: ${width}x${height}")
           surface = Surface(st)
           surfaceReady = true
+          // Re-attach surface to existing player if it was detached (e.g. after rotation)
+          mediaPlayer?.let { player ->
+            val vout = player.vlcVout
+            if (!vout.areViewsAttached()) {
+              vout.setVideoSurface(surface, null)
+              if (width > 0 && height > 0) vout.setWindowSize(width, height)
+              vout.attachViews()
+              player.videoScale = MediaPlayer.ScaleType.SURFACE_FILL
+              Log.d(TAG, "VLC surface re-attached after recreation")
+            }
+          }
           if (pendingPlay) {
             pendingPlay = false
             doPlay()
@@ -83,8 +99,14 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
           }
         }
         override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
-          // Keep surface alive across rotation
-          return false
+          Log.d(TAG, "SurfaceTexture destroyed")
+          surfaceReady = false
+          try {
+            mediaPlayer?.vlcVout?.detachViews()
+          } catch (_: Exception) {}
+          surface?.release()
+          surface = null
+          return true
         }
         override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
       }
@@ -115,6 +137,13 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
       connectUrl = "$connectUrl/$streamName"
     }
     return connectUrl
+  }
+
+  private fun createMedia(connectUrl: String): Media {
+    val vlc = ensureVLC()
+    val media = Media(vlc, Uri.parse(connectUrl))
+    media.setHWDecoderEnabled(true, false)
+    return media
   }
 
   private fun ensureVLC(): LibVLC {
@@ -177,10 +206,12 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
         }
         // TimeChanged fires every frame — only emit if we haven't reported "playing" yet
         MediaPlayer.Event.TimeChanged -> {
-          if (player.isPlaying && lastReportedState != "playing") {
+          if (player.isPlaying) {
             post {
-              lastReportedState = "playing"
-              onPlayerStateChanged(mapOf("state" to "playing"))
+              if (lastReportedState != "playing") {
+                lastReportedState = "playing"
+                onPlayerStateChanged(mapOf("state" to "playing"))
+              }
             }
           }
         }
@@ -244,9 +275,7 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
 
     try {
       val player = ensureMediaPlayer()
-      val vlc = ensureVLC()
-      val media = Media(vlc, Uri.parse(connectUrl))
-      media.setHWDecoderEnabled(true, false)
+      val media = createMedia(connectUrl)
       player.media = media
       media.release()
       player.play()
@@ -288,14 +317,13 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
       val connectUrl = buildConnectUrl()
       try {
         val player = ensureMediaPlayer()
-        val vlc = ensureVLC()
-        val media = Media(vlc, Uri.parse(connectUrl))
-        media.setHWDecoderEnabled(true, false)
+        val media = createMedia(connectUrl)
         player.media = media
         media.release()
         player.play()
         isPlaying = true
-        onPlayerStateChanged(mapOf("state" to "playing"))
+        lastReportedState = "connecting"
+        onPlayerStateChanged(mapOf("state" to "connecting"))
       } catch (e: Exception) {
         Log.e(TAG, "resume failed", e)
       }
@@ -320,9 +348,7 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
         }
         try {
           mediaPlayer?.stop()
-          val vlc = ensureVLC()
-          val media = Media(vlc, Uri.parse(buildConnectUrl()))
-          media.setHWDecoderEnabled(true, false)
+          val media = createMedia(buildConnectUrl())
           mediaPlayer?.media = media
           media.release()
           mediaPlayer?.play()
@@ -342,8 +368,9 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
     reconnectAttempts = 0
   }
 
-  fun cleanup() {
+  private fun cleanup() {
     stopReconnectPoller()
+    isPlaying = false // Set BEFORE stop() to prevent VLC callback from starting reconnect poller
     try {
       mediaPlayer?.stop()
       mediaPlayer?.vlcVout?.detachViews()

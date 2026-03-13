@@ -37,3 +37,4 @@ example/android/.gradle/
 example/android/local.properties
 example/ios/build/
 example/ios/Pods/
+.expo/

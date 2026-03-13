@@ -10,12 +10,12 @@
   },
   "dependencies": {
     "expo": "~54.0.0",
-    "react": "^19.1.0",
-    "react-native": "0.81.5",
-    "expo-live-stream": "../"
+    "expo-live-stream": "../",
+    "react": "19.1.0",
+    "react-native": "0.81.5"
   },
   "devDependencies": {
     "@babel/core": "^7.24.0",
-    "typescript": "~5.3.3"
+    "typescript": "~5.9.2"
   }
 }

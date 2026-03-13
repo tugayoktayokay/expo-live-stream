@@ -1,6 +1,4 @@
 PODS:
-  - EXConstants (18.0.13):
-    - ExpoModulesCore
   - Expo (54.0.33):
     - ExpoModulesCore
     - hermes-engine
@@ -1701,12 +1699,11 @@ PODS:
   - Yoga (0.0.0)
 
 DEPENDENCIES:
-  - EXConstants (from `../node_modules/expo/node_modules/expo-constants/ios`)
   - Expo (from `../node_modules/expo`)
-  - ExpoAsset (from `../node_modules/expo/node_modules/expo-asset/ios`)
-  - ExpoFileSystem (from `../node_modules/expo/node_modules/expo-file-system/ios`)
-  - ExpoFont (from `../node_modules/expo/node_modules/expo-font/ios`)
-  - ExpoKeepAwake (from `../node_modules/expo/node_modules/expo-keep-awake/ios`)
+  - ExpoAsset (from `../node_modules/expo-asset/ios`)
+  - ExpoFileSystem (from `../node_modules/expo-file-system/ios`)
+  - ExpoFont (from `../node_modules/expo-font/ios`)
+  - ExpoKeepAwake (from `../node_modules/expo-keep-awake/ios`)
   - ExpoLiveStream (from `../../ios`)
   - ExpoModulesCore (from `../node_modules/expo-modules-core`)
   - FBLazyVector (from `../node_modules/react-native/Libraries/FBLazyVector`)
@@ -1785,18 +1782,16 @@ SPEC REPOS:
     - MobileVLCKit
 
 EXTERNAL SOURCES:
-  EXConstants:
-    :path: "../node_modules/expo/node_modules/expo-constants/ios"
   Expo:
     :path: "../node_modules/expo"
   ExpoAsset:
-    :path: "../node_modules/expo/node_modules/expo-asset/ios"
+    :path: "../node_modules/expo-asset/ios"
   ExpoFileSystem:
-    :path: "../node_modules/expo/node_modules/expo-file-system/ios"
+    :path: "../node_modules/expo-file-system/ios"
   ExpoFont:
-    :path: "../node_modules/expo/node_modules/expo-font/ios"
+    :path: "../node_modules/expo-font/ios"
   ExpoKeepAwake:
-    :path: "../node_modules/expo/node_modules/expo-keep-awake/ios"
+    :path: "../node_modules/expo-keep-awake/ios"
   ExpoLiveStream:
     :path: "../../ios"
   ExpoModulesCore:
@@ -1938,13 +1933,12 @@ EXTERNAL SOURCES:
     :path: "../node_modules/react-native/ReactCommon/yoga"
 
 SPEC CHECKSUMS:
-  EXConstants: fce59a631a06c4151602843667f7cfe35f81e271
   Expo: aadbcc8c6c14ff3105a9154f1683cb1424ff0d2a
   ExpoAsset: f867e55ceb428aab99e1e8c082b5aee7c159ea18
   ExpoFileSystem: 858a44267a3e6e9057e0888ad7c7cfbf55d52063
   ExpoFont: f543ce20a228dd702813668b1a07b46f51878d47
   ExpoKeepAwake: 55f75eca6499bb9e4231ebad6f3e9cb8f99c0296
-  ExpoLiveStream: 69e414ea73b0251fff5ecd9fc06ca32330196323
+  ExpoLiveStream: 3c10faa3040cfec732b90144a046ff09ca0278f9
   ExpoModulesCore: f3da4f1ab5a8375d0beafab763739dbee8446583
   FBLazyVector: e95a291ad2dadb88e42b06e0c5fb8262de53ec12
   HaishinKit: add48c1321b98351e38498fe869efee230c92d05
@@ -2017,6 +2011,6 @@ SPEC CHECKSUMS:
   ReactNativeDependencies: 71ce9c28beb282aa720ea7b46980fff9669f428a
   Yoga: 5934998fbeaef7845dbf698f698518695ab4cd1a
 
-PODFILE CHECKSUM: 11e6c27f37937b51f6988e9b5bc691dfd0fbfbac
+PODFILE CHECKSUM: fc7f7bf78fb7270f2ff648bfd585d51ec55e9fdb
 
 COCOAPODS: 1.16.2

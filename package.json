@@ -43,10 +43,12 @@
     "ios",
     "android/src",
     "android/build.gradle",
+    "android/consumer-rules.pro",
     "expo-module.config.json"
   ],
   "devDependencies": {
     "@types/react": "^19.2.14",
+    "babel-plugin-react-compiler": "^19.0.0-beta-ebf51a3-20250411",
     "eslint-config-expo": "^55.0.0",
     "expo-module-scripts": "^4.1.9"
   },
@@ -55,7 +57,5 @@
     "react": "*",
     "react-native": "*"
   },
-  "dependencies": {
-    "babel-plugin-react-compiler": "^19.0.0-beta-ebf51a3-20250411"
-  }
+  "packageManager": "yarn@4.13.0"
 }

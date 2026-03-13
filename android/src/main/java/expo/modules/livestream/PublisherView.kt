@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.util.Log
+import android.view.SurfaceHolder
 
 import androidx.core.content.ContextCompat
 import com.pedro.common.ConnectChecker
@@ -20,6 +21,11 @@ class PublisherView(
 
   companion object {
     private const val TAG = "ExpoLiveStream"
+    /**
+     * Singleton reference — only one publisher can be active at a time.
+     * This is intentional: live streaming uses a single camera source.
+     * The instance is set on init and cleared on detach.
+     */
     @JvmStatic
     var activeInstance: PublisherView? = null
       private set
@@ -47,17 +53,17 @@ class PublisherView(
   val onStreamStateChanged by EventDispatcher()
   val onBitrateUpdate by EventDispatcher()
 
-  // State
-  private var isStreaming = false
-  private var isMuted = false
-  private var isFlashOn = false
-  private var isSurfaceReady = false
-  private var isCameraInitialized = false
-  private var isSwitchingCamera = false
-  private var isBouncing = false
-  private var isBackgrounding = false
+  // State — @Volatile for fields accessed from RootEncoder callback threads
+  @Volatile private var isStreaming = false
+  @Volatile private var isMuted = false
+  @Volatile private var isFlashOn = false
+  @Volatile private var isSurfaceReady = false
+  @Volatile private var isCameraInitialized = false
+  @Volatile private var isSwitchingCamera = false
+  @Volatile private var isBouncing = false
+  @Volatile private var isBackgrounding = false
   private var lastStreamUrl: String? = null
-  private var wasStreamingBeforeBackground = false
+  @Volatile private var wasStreamingBeforeBackground = false
 
   init {
     activeInstance = this
@@ -131,9 +137,20 @@ class PublisherView(
   private fun setupView() {
     openGlView = OpenGlView(context).apply {
       layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
+      holder.addCallback(object : SurfaceHolder.Callback {
+        override fun surfaceCreated(holder: SurfaceHolder) {
+          Log.d(TAG, "OpenGL surface created")
+          isSurfaceReady = true
+          post { tryInitCamera() }
+        }
+        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
+        override fun surfaceDestroyed(holder: SurfaceHolder) {
+          Log.d(TAG, "OpenGL surface destroyed")
+          isSurfaceReady = false
+        }
+      })
     }
     addView(openGlView)
-    post { postDelayed({ isSurfaceReady = true; tryInitCamera() }, 500) }
   }
 
   private fun hasPermissions(): Boolean {

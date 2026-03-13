@@ -9,19 +9,19 @@ class ExpoLiveStreamPlayerModule : Module() {
 
     // ======== Player Functions ========
     AsyncFunction("playerPlay") {
-      PlayerView.activeInstance?.play()
+      PlayerView.activeInstance?.let { view -> view.post { view.play() } }
     }
 
     AsyncFunction("playerStop") {
-      PlayerView.activeInstance?.stop()
+      PlayerView.activeInstance?.let { view -> view.post { view.stop() } }
     }
 
     AsyncFunction("playerPause") {
-      PlayerView.activeInstance?.pause()
+      PlayerView.activeInstance?.let { view -> view.post { view.pause() } }
     }
 
     AsyncFunction("playerResume") {
-      PlayerView.activeInstance?.resume()
+      PlayerView.activeInstance?.let { view -> view.post { view.resume() } }
     }
 
     // ======== Player View ========

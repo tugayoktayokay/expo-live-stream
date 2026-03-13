@@ -41,6 +41,11 @@ export interface WatermarkProps {
  * Overlay watermark component for live streams.
  * Place this as a sibling AFTER ExpoLiveStreamPublisherView inside a container.
  *
+ * **Note:** This is a UI-only overlay — the watermark is visible on the
+ * device screen but is **NOT burned into the RTMP stream**. Viewers on the
+ * receiving end will not see it. For stream-level watermarking, use your
+ * media server's overlay feature (e.g., Nginx-RTMP, Wowza, or OBS relay).
+ *
  * @example
  * ```tsx
  * <View style={{ flex: 1 }}>
@@ -73,7 +78,7 @@ export function LiveStreamWatermark({
   textStyle,
   style,
 }: WatermarkProps) {
-  const positionStyle = getPositionStyle(position, margin);
+  const positionStyle = getPositionStyle(position, margin, size);
 
   return (
     <View
@@ -99,6 +104,7 @@ export function LiveStreamWatermark({
 function getPositionStyle(
   position: WatermarkPosition,
   margin: number,
+  size: number,
 ): ViewStyle {
   switch (position) {
     case 'top-left':
@@ -113,7 +119,7 @@ function getPositionStyle(
       return {
         top: '50%',
         left: '50%',
-        transform: [{ translateX: -30 }, { translateY: -30 }],
+        transform: [{ translateX: -(size / 2) }, { translateY: -(size / 2) }],
       } as ViewStyle;
     default:
       return { top: margin, right: margin };

@@ -1,5 +1,7 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import type React from 'react';
 import type { LiveStreamPublisherRef, StreamState } from './ExpoLiveStreamPublisherView';
+import type { PlayerState } from './ExpoLiveStreamPlayerView';
 
 // ─── Statistics ──────────────────────────────────────────────
 
@@ -139,10 +141,22 @@ export interface UseLiveStreamReturn {
 export function useLiveStream(options: UseLiveStreamOptions = {}): UseLiveStreamReturn {
     const { autoStopOnUnmount = true, reconnect: reconnectOpt } = options;
 
-    const reconnectConfig = {
+    const reconnectConfig = useMemo(() => ({
         ...DEFAULT_RECONNECT,
         ...reconnectOpt,
-    };
+    }), [
+        reconnectOpt?.enabled,
+        reconnectOpt?.maxRetries,
+        reconnectOpt?.initialDelay,
+        reconnectOpt?.maxDelay,
+        reconnectOpt?.backoffMultiplier,
+    ]);
+
+    // Ref-track callbacks so they never invalidate memoized config/callbacks
+    const reconnectCallbacksRef = useRef(reconnectOpt);
+    useEffect(() => {
+        reconnectCallbacksRef.current = reconnectOpt;
+    });
 
     const ref = useRef<LiveStreamPublisherRef>(null);
     const [state, setState] = useState<StreamState>('idle');
@@ -162,6 +176,9 @@ export function useLiveStream(options: UseLiveStreamOptions = {}): UseLiveStream
     const durationTimerRef = useRef<any>(null);
     const streamStartTimeRef = useRef<number>(0);
     const wasStreamingRef = useRef(false);
+    const reconnectAttemptRef = useRef(0);
+    const lastBitrateTimestamp = useRef<number>(0);
+    const isReconnectingRef = useRef(false);
 
     const isStreaming = state === 'streaming';
     const isConnecting = state === 'connecting';
@@ -195,8 +212,11 @@ export function useLiveStream(options: UseLiveStreamOptions = {}): UseLiveStream
     const start = useCallback((url?: string) => {
         setError(null);
         setReconnectAttempt(0);
+        reconnectAttemptRef.current = 0;
+        isReconnectingRef.current = false;
         setIsReconnecting(false);
         streamStartTimeRef.current = 0;
+        lastBitrateTimestamp.current = 0;
         setStatistics({
             bitrate: 0,
             bitrateFormatted: '0 bps',
@@ -211,8 +231,10 @@ export function useLiveStream(options: UseLiveStreamOptions = {}): UseLiveStream
 
     const stop = useCallback(() => {
         wasStreamingRef.current = false;
+        isReconnectingRef.current = false;
         setIsReconnecting(false);
         setReconnectAttempt(0);
+        reconnectAttemptRef.current = 0;
         if (reconnectTimerRef.current) {
             clearTimeout(reconnectTimerRef.current);
             reconnectTimerRef.current = null;
@@ -226,29 +248,32 @@ export function useLiveStream(options: UseLiveStreamOptions = {}): UseLiveStream
     const clearError = useCallback(() => setError(null), []);
 
     // ── Auto-reconnect logic ──
-    const attemptReconnect = useCallback(
-        (attempt: number) => {
-            if (!reconnectConfig.enabled || attempt >= reconnectConfig.maxRetries) {
-                setIsReconnecting(false);
-                reconnectOpt?.onReconnectFailed?.();
-                return;
-            }
+    const attemptReconnect = useCallback(() => {
+        const attempt = reconnectAttemptRef.current;
+        if (!reconnectConfig.enabled || attempt >= reconnectConfig.maxRetries) {
+            isReconnectingRef.current = false;
+            setIsReconnecting(false);
+            reconnectAttemptRef.current = 0;
+            reconnectCallbacksRef.current?.onReconnectFailed?.();
+            return;
+        }
 
-            const delay = Math.min(
-                reconnectConfig.initialDelay * Math.pow(reconnectConfig.backoffMultiplier, attempt),
-                reconnectConfig.maxDelay,
-            );
+        const delay = Math.min(
+            reconnectConfig.initialDelay * Math.pow(reconnectConfig.backoffMultiplier, attempt),
+            reconnectConfig.maxDelay,
+        );
 
-            setIsReconnecting(true);
-            setReconnectAttempt(attempt + 1);
-            reconnectOpt?.onReconnectAttempt?.(attempt + 1, reconnectConfig.maxRetries);
+        const nextAttempt = attempt + 1;
+        reconnectAttemptRef.current = nextAttempt;
+        isReconnectingRef.current = true;
+        setIsReconnecting(true);
+        setReconnectAttempt(nextAttempt);
+        reconnectCallbacksRef.current?.onReconnectAttempt?.(nextAttempt, reconnectConfig.maxRetries);
 
-            reconnectTimerRef.current = setTimeout(() => {
-                ref.current?.start(lastUrlRef.current);
-            }, delay);
-        },
-        [reconnectConfig, reconnectOpt],
-    );
+        reconnectTimerRef.current = setTimeout(() => {
+            ref.current?.start(lastUrlRef.current);
+        }, delay);
+    }, [reconnectConfig]);
 
     // ── Event handlers ──
     const handleStreamStateChanged = useCallback(
@@ -256,13 +281,14 @@ export function useLiveStream(options: UseLiveStreamOptions = {}): UseLiveStream
             const newState = event.nativeEvent.state;
             setState(newState);
 
-            if (newState === 'streaming' && isReconnecting) {
+            if (newState === 'streaming' && isReconnectingRef.current) {
+                isReconnectingRef.current = false;
                 setIsReconnecting(false);
                 setReconnectAttempt(0);
-                reconnectOpt?.onReconnectSuccess?.();
+                reconnectCallbacksRef.current?.onReconnectSuccess?.();
             }
         },
-        [isReconnecting, reconnectOpt],
+        [],
     );
 
     const handleConnectionFailed = useCallback(
@@ -271,10 +297,10 @@ export function useLiveStream(options: UseLiveStreamOptions = {}): UseLiveStream
             setState('failed');
 
             if (wasStreamingRef.current && reconnectConfig.enabled) {
-                attemptReconnect(reconnectAttempt);
+                attemptReconnect();
             }
         },
-        [reconnectConfig, reconnectAttempt, attemptReconnect],
+        [reconnectConfig, attemptReconnect],
     );
 
     const handleConnectionSuccess = useCallback((_event: any) => {
@@ -286,7 +312,8 @@ export function useLiveStream(options: UseLiveStreamOptions = {}): UseLiveStream
             setState('disconnected');
 
             if (wasStreamingRef.current && reconnectConfig.enabled) {
-                attemptReconnect(0);
+                reconnectAttemptRef.current = 0;
+                attemptReconnect();
             }
         },
         [reconnectConfig, attemptReconnect],
@@ -294,11 +321,17 @@ export function useLiveStream(options: UseLiveStreamOptions = {}): UseLiveStream
 
     const handleBitrateUpdate = useCallback((event: { nativeEvent: { bitrate: number } }) => {
         const bps = event.nativeEvent.bitrate;
+        const now = Date.now();
+        const lastTs = lastBitrateTimestamp.current;
+        // Calculate bytes sent since last callback using actual time delta
+        const intervalSec = lastTs > 0 ? (now - lastTs) / 1000 : 2; // default 2s for first callback
+        lastBitrateTimestamp.current = now;
+
         setStatistics((prev) => ({
             ...prev,
             bitrate: bps,
             bitrateFormatted: formatBitrate(bps),
-            totalBytesSent: prev.totalBytesSent + bps / 8, // approximate
+            totalBytesSent: prev.totalBytesSent + (bps / 8) * intervalSec,
         }));
     }, []);
 
@@ -344,15 +377,6 @@ export interface UseLiveStreamPlayerOptions {
     /** Auto-reconnect config for player */
     reconnect?: ReconnectConfig;
 }
-
-export type PlayerState =
-    | 'idle'
-    | 'connecting'
-    | 'buffering'
-    | 'playing'
-    | 'paused'
-    | 'stopped'
-    | 'failed';
 
 export interface UseLiveStreamPlayerReturn {
     /** Ref to attach to ExpoLiveStreamPlayerView */
@@ -407,10 +431,21 @@ export function useLiveStreamPlayer(
 ): UseLiveStreamPlayerReturn {
     const { autoPlay = false, autoStopOnUnmount = true, reconnect: reconnectOpt } = options;
 
-    const reconnectConfig = {
+    const reconnectConfig = useMemo(() => ({
         ...DEFAULT_RECONNECT,
         ...reconnectOpt,
-    };
+    }), [
+        reconnectOpt?.enabled,
+        reconnectOpt?.maxRetries,
+        reconnectOpt?.initialDelay,
+        reconnectOpt?.maxDelay,
+        reconnectOpt?.backoffMultiplier,
+    ]);
+
+    const reconnectCallbacksRef = useRef(reconnectOpt);
+    useEffect(() => {
+        reconnectCallbacksRef.current = reconnectOpt;
+    });
 
     const ref = useRef<any>(null);
     const [state, setState] = useState<PlayerState>('idle');
@@ -420,6 +455,8 @@ export function useLiveStreamPlayer(
     const reconnectTimerRef = useRef<any>(null);
     const hasAutoPlayed = useRef(false);
     const wasPlayingRef = useRef(false);
+    const reconnectAttemptRef = useRef(0);
+    const isReconnectingRef = useRef(false);
 
     const isPlaying = state === 'playing';
     const isBuffering = state === 'buffering';
@@ -432,8 +469,10 @@ export function useLiveStreamPlayer(
 
     const stop = useCallback(() => {
         wasPlayingRef.current = false;
+        isReconnectingRef.current = false;
         setIsReconnecting(false);
         setReconnectAttempt(0);
+        reconnectAttemptRef.current = 0;
         if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
         ref.current?.stop();
     }, []);
@@ -443,29 +482,32 @@ export function useLiveStreamPlayer(
     const clearError = useCallback(() => setError(null), []);
 
     // ── Auto-reconnect ──
-    const attemptReconnect = useCallback(
-        (attempt: number) => {
-            if (!reconnectConfig.enabled || attempt >= reconnectConfig.maxRetries) {
-                setIsReconnecting(false);
-                reconnectOpt?.onReconnectFailed?.();
-                return;
-            }
+    const attemptReconnect = useCallback(() => {
+        const attempt = reconnectAttemptRef.current;
+        if (!reconnectConfig.enabled || attempt >= reconnectConfig.maxRetries) {
+            isReconnectingRef.current = false;
+            setIsReconnecting(false);
+            reconnectAttemptRef.current = 0;
+            reconnectCallbacksRef.current?.onReconnectFailed?.();
+            return;
+        }
 
-            const delay = Math.min(
-                reconnectConfig.initialDelay * Math.pow(reconnectConfig.backoffMultiplier, attempt),
-                reconnectConfig.maxDelay,
-            );
+        const delay = Math.min(
+            reconnectConfig.initialDelay * Math.pow(reconnectConfig.backoffMultiplier, attempt),
+            reconnectConfig.maxDelay,
+        );
 
-            setIsReconnecting(true);
-            setReconnectAttempt(attempt + 1);
-            reconnectOpt?.onReconnectAttempt?.(attempt + 1, reconnectConfig.maxRetries);
+        const nextAttempt = attempt + 1;
+        reconnectAttemptRef.current = nextAttempt;
+        isReconnectingRef.current = true;
+        setIsReconnecting(true);
+        setReconnectAttempt(nextAttempt);
+        reconnectCallbacksRef.current?.onReconnectAttempt?.(nextAttempt, reconnectConfig.maxRetries);
 
-            reconnectTimerRef.current = setTimeout(() => {
-                ref.current?.play();
-            }, delay);
-        },
-        [reconnectConfig, reconnectOpt],
-    );
+        reconnectTimerRef.current = setTimeout(() => {
+            ref.current?.play();
+        }, delay);
+    }, [reconnectConfig]);
 
     // ── Event handlers ──
     const handlePlayerStateChanged = useCallback(
@@ -473,13 +515,15 @@ export function useLiveStreamPlayer(
             const newState = event.nativeEvent.state as PlayerState;
             setState(newState);
 
-            if (newState === 'playing' && isReconnecting) {
+            if (newState === 'playing' && isReconnectingRef.current) {
+                isReconnectingRef.current = false;
                 setIsReconnecting(false);
                 setReconnectAttempt(0);
-                reconnectOpt?.onReconnectSuccess?.();
+                setError(null);
+                reconnectCallbacksRef.current?.onReconnectSuccess?.();
             }
         },
-        [isReconnecting, reconnectOpt],
+        [],
     );
 
     const handlePlayerError = useCallback(
@@ -488,17 +532,17 @@ export function useLiveStreamPlayer(
             setState('failed');
 
             if (wasPlayingRef.current && reconnectConfig.enabled) {
-                attemptReconnect(reconnectAttempt);
+                attemptReconnect();
             }
         },
-        [reconnectConfig, reconnectAttempt, attemptReconnect],
+        [reconnectConfig, attemptReconnect],
     );
 
     // ── Auto-play ──
     useEffect(() => {
-        if (autoPlay && !hasAutoPlayed.current && ref.current) {
+        if (autoPlay && !hasAutoPlayed.current) {
             hasAutoPlayed.current = true;
-            const timer = setTimeout(() => play(), 300);
+            const timer = setTimeout(() => play(), 500);
             return () => clearTimeout(timer);
         }
     }, [autoPlay, play]);

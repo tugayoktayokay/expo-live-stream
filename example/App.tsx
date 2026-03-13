@@ -22,7 +22,7 @@ type Mode = "menu" | "publisher" | "player";
 
 export default function App() {
   const [mode, setMode] = useState<Mode>("menu");
-  const [rtmpUrl, setRtmpUrl] = useState("rtmp://192.168.68.59/live/test");
+  const [rtmpUrl, setRtmpUrl] = useState("rtmp://192.168.0.53/live/test");
 
   if (mode === "menu") {
     return (
@@ -137,20 +137,27 @@ function PublisherScreen({ url, onBack }: { url: string; onBack: () => void }) {
 // ─── PLAYER SCREEN (using useLiveStreamPlayer hook) ──────────
 
 function PlayerScreen({ url, onBack }: { url: string; onBack: () => void }) {
-  const { ref, state, isPlaying, isBuffering, play, stop, pause, resume } =
-    useLiveStreamPlayer({ autoPlay: true });
+  const {
+    ref,
+    state,
+    isPlaying,
+    isBuffering,
+    play,
+    stop,
+    pause,
+    resume,
+    handlePlayerStateChanged,
+    handlePlayerError,
+  } = useLiveStreamPlayer({ autoPlay: true });
 
   return (
     <View style={styles.fullScreen}>
       <ExpoLiveStreamPlayerView
         ref={ref}
-        style={StyleSheet.absoluteFill}
+        style={StyleSheet.absoluteFill as any}
         url={url}
-        autoPlay
-        onPlayerStateChanged={(e) =>
-          console.log("[Player]", e.nativeEvent.state)
-        }
-        onPlayerError={(e) => Alert.alert("Player Error", e.nativeEvent.msg)}
+        onPlayerStateChanged={handlePlayerStateChanged}
+        onPlayerError={handlePlayerError}
       />
 
       {/* Status Badge */}

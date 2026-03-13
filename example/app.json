@@ -1,0 +1,9 @@
+{
+  "android": {
+    "package": "com.anonymous.expolivestreamexample"
+  },
+  "ios": {
+    "bundleIdentifier": "com.anonymous.expolivestreamexample",
+    "appleTeamId": "QS2YCK3J3E"
+  }
+}
