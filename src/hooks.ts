@@ -141,16 +141,20 @@ export interface UseLiveStreamReturn {
 export function useLiveStream(options: UseLiveStreamOptions = {}): UseLiveStreamReturn {
     const { autoStopOnUnmount = true, reconnect: reconnectOpt } = options;
 
+    const rcEnabled = reconnectOpt?.enabled;
+    const rcMaxRetries = reconnectOpt?.maxRetries;
+    const rcInitialDelay = reconnectOpt?.initialDelay;
+    const rcMaxDelay = reconnectOpt?.maxDelay;
+    const rcBackoffMultiplier = reconnectOpt?.backoffMultiplier;
+
     const reconnectConfig = useMemo(() => ({
         ...DEFAULT_RECONNECT,
-        ...reconnectOpt,
-    }), [
-        reconnectOpt?.enabled,
-        reconnectOpt?.maxRetries,
-        reconnectOpt?.initialDelay,
-        reconnectOpt?.maxDelay,
-        reconnectOpt?.backoffMultiplier,
-    ]);
+        enabled: rcEnabled ?? DEFAULT_RECONNECT.enabled,
+        maxRetries: rcMaxRetries ?? DEFAULT_RECONNECT.maxRetries,
+        initialDelay: rcInitialDelay ?? DEFAULT_RECONNECT.initialDelay,
+        maxDelay: rcMaxDelay ?? DEFAULT_RECONNECT.maxDelay,
+        backoffMultiplier: rcBackoffMultiplier ?? DEFAULT_RECONNECT.backoffMultiplier,
+    }), [rcEnabled, rcMaxRetries, rcInitialDelay, rcMaxDelay, rcBackoffMultiplier]);
 
     // Ref-track callbacks so they never invalidate memoized config/callbacks
     const reconnectCallbacksRef = useRef(reconnectOpt);
@@ -337,10 +341,13 @@ export function useLiveStream(options: UseLiveStreamOptions = {}): UseLiveStream
 
     // ── Cleanup ──
     useEffect(() => {
+        const currentRef = ref.current;
+        const currentReconnectTimer = reconnectTimerRef.current;
+        const currentDurationTimer = durationTimerRef.current;
         return () => {
-            if (autoStopOnUnmount) ref.current?.stop();
-            if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
-            if (durationTimerRef.current) clearInterval(durationTimerRef.current);
+            if (autoStopOnUnmount) currentRef?.stop();
+            if (currentReconnectTimer) clearTimeout(currentReconnectTimer);
+            if (currentDurationTimer) clearInterval(currentDurationTimer);
         };
     }, [autoStopOnUnmount]);
 
@@ -431,16 +438,20 @@ export function useLiveStreamPlayer(
 ): UseLiveStreamPlayerReturn {
     const { autoPlay = false, autoStopOnUnmount = true, reconnect: reconnectOpt } = options;
 
+    const rcEnabled = reconnectOpt?.enabled;
+    const rcMaxRetries = reconnectOpt?.maxRetries;
+    const rcInitialDelay = reconnectOpt?.initialDelay;
+    const rcMaxDelay = reconnectOpt?.maxDelay;
+    const rcBackoffMultiplier = reconnectOpt?.backoffMultiplier;
+
     const reconnectConfig = useMemo(() => ({
         ...DEFAULT_RECONNECT,
-        ...reconnectOpt,
-    }), [
-        reconnectOpt?.enabled,
-        reconnectOpt?.maxRetries,
-        reconnectOpt?.initialDelay,
-        reconnectOpt?.maxDelay,
-        reconnectOpt?.backoffMultiplier,
-    ]);
+        enabled: rcEnabled ?? DEFAULT_RECONNECT.enabled,
+        maxRetries: rcMaxRetries ?? DEFAULT_RECONNECT.maxRetries,
+        initialDelay: rcInitialDelay ?? DEFAULT_RECONNECT.initialDelay,
+        maxDelay: rcMaxDelay ?? DEFAULT_RECONNECT.maxDelay,
+        backoffMultiplier: rcBackoffMultiplier ?? DEFAULT_RECONNECT.backoffMultiplier,
+    }), [rcEnabled, rcMaxRetries, rcInitialDelay, rcMaxDelay, rcBackoffMultiplier]);
 
     const reconnectCallbacksRef = useRef(reconnectOpt);
     useEffect(() => {
@@ -549,9 +560,11 @@ export function useLiveStreamPlayer(
 
     // ── Cleanup ──
     useEffect(() => {
+        const currentRef = ref.current;
+        const currentReconnectTimer = reconnectTimerRef.current;
         return () => {
-            if (autoStopOnUnmount) ref.current?.stop();
-            if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+            if (autoStopOnUnmount) currentRef?.stop();
+            if (currentReconnectTimer) clearTimeout(currentReconnectTimer);
         };
     }, [autoStopOnUnmount]);
 
