@@ -1,4 +1,5 @@
 import ExpoModulesCore
+import UIKit
 import MobileVLCKit
 
 class PlayerView: ExpoView, VLCMediaPlayerDelegate {
@@ -16,17 +17,23 @@ class PlayerView: ExpoView, VLCMediaPlayerDelegate {
   var url: String = ""
   var streamName: String = ""
 
-  // MARK: - Events
+  // MARK: - Event emitters
   let onPlayerStateChanged = EventDispatcher()
   let onPlayerError = EventDispatcher()
 
-  // MARK: - State (exactly matches Android PlayerView.kt)
+  // MARK: - State (matches Android)
   private var isPlaying = false
   private var lastPlayRequestAt: TimeInterval = 0
-  // Auto-reconnect (matches ExoPlayer's built-in retry)
+  private var lastReportedState = ""
+
+  // Auto-reconnect (up to 10 attempts ~35s tolerance for server/network glitches)
   private var reconnectAttempts = 0
-  private let maxReconnectAttempts = 3
+  private let maxReconnectAttempts = 10
   private var reconnectTimer: Timer?
+
+  // Silent stall watchdog — detects if video frames stop arriving for >8s
+  private var lastFrameTime: TimeInterval = 0
+  private var stallCheckTimer: Timer?
 
   // MARK: - Rotation (matches Android DisplayManager.DisplayListener)
   private var orientationObserver: NSObjectProtocol?
@@ -84,24 +91,29 @@ class PlayerView: ExpoView, VLCMediaPlayerDelegate {
   // MARK: - Helpers
 
   private func buildConnectUrl() -> String {
-    var connectUrl = url
-    let playName = streamName
+    var connectUrl = url.trimmingCharacters(in: .whitespacesAndNewlines)
+    let playName = streamName.trimmingCharacters(in: .whitespacesAndNewlines)
     if !playName.isEmpty && !connectUrl.hasSuffix("/\(playName)") {
-      connectUrl = "\(connectUrl)/\(playName)"
+      connectUrl = connectUrl.hasSuffix("/") ? "\(connectUrl)\(playName)" : "\(connectUrl)/\(playName)"
     }
     return connectUrl
   }
 
   private func createMedia(url mediaUrl: URL) -> VLCMedia {
     let media = VLCMedia(url: mediaUrl)
-    media.addOption("--network-caching=100")
-    media.addOption("--rtmp-buffer=0")
-    media.addOption("--live-caching=100")
+    media.addOption("--network-caching=1500")
+    media.addOption("--rtmp-buffer=100")
+    media.addOption("--live-caching=1500")
     media.addOption("--clock-jitter=0")
     media.addOption("--clock-synchro=0")
-    media.addOption("--file-caching=0")
-    media.addOption("--drop-late-frames")
-    media.addOption("--skip-frames")
+    media.addOption("--file-caching=300")
+    media.addOption(":network-caching=1500")
+    media.addOption(":rtmp-buffer=100")
+    media.addOption(":live-caching=1500")
+    media.addOption(":clock-jitter=0")
+    media.addOption(":clock-synchro=0")
+    media.addOption(":file-caching=300")
+    media.addOption(":codec=all")
     return media
   }
 
@@ -143,12 +155,14 @@ class PlayerView: ExpoView, VLCMediaPlayerDelegate {
 
     mediaPlayer?.media = createMedia(url: mediaUrl)
     mediaPlayer?.play()
+    startStallChecker()
   }
 
   // Matches Android stop()
   func stop() {
     guard isPlaying || mediaPlayer?.isPlaying == true else { return }
     isPlaying = false
+    stopStallChecker()
     stopReconnectPoller()
     mediaPlayer?.stop()
     lastReportedState = "stopped"
@@ -176,6 +190,7 @@ class PlayerView: ExpoView, VLCMediaPlayerDelegate {
     mediaPlayer?.media = createMedia(url: mediaUrl)
     mediaPlayer?.play()
     isPlaying = true
+    startStallChecker()
   }
 
   // MARK: - VLCMediaPlayerDelegate (matches Android Player.Listener)
@@ -185,6 +200,7 @@ class PlayerView: ExpoView, VLCMediaPlayerDelegate {
 
     switch player.state {
     case .playing:
+      lastFrameTime = Date().timeIntervalSince1970
       if lastReportedState != "playing" {
         lastReportedState = "playing"
         onPlayerStateChanged(["state": "playing"])
@@ -218,25 +234,45 @@ class PlayerView: ExpoView, VLCMediaPlayerDelegate {
     }
   }
 
+  // MARK: - Silent Stall Watchdog
+  private func startStallChecker() {
+    stopStallChecker()
+    lastFrameTime = Date().timeIntervalSince1970
+    stallCheckTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+      guard let self = self else { return }
+      if self.isPlaying && self.lastReportedState == "playing" && self.lastFrameTime > 0 {
+        let elapsed = Date().timeIntervalSince1970 - self.lastFrameTime
+        if elapsed > 8.0 {
+          print("[ExpoLiveStreamPlayer] Stream stalled (\(elapsed)s without frame), auto-reconnecting")
+          self.lastFrameTime = 0
+          self.startReconnectPoller()
+        }
+      }
+    }
+  }
+
+  private func stopStallChecker() {
+    stallCheckTimer?.invalidate()
+    stallCheckTimer = nil
+    lastFrameTime = 0
+  }
+
   // MARK: - Smart Reconnect Poller
-  // Polls every 5 seconds to see if stream is back online (publisher restarted)
-  // Doesn't interfere with normal playback — only activates after stream actually dies
+  // Polls every 3.5s up to 10 times (~35s tolerance) to recover from server dropouts
   private func startReconnectPoller() {
-    // Don't start multiple pollers
     guard reconnectTimer == nil else { return }
     reconnectAttempts = 0
 
     print("[ExpoLiveStreamPlayer] stream lost — starting reconnect poller")
     onPlayerStateChanged(["state": "buffering"])
 
-    reconnectTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] timer in
+    reconnectTimer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: true) { [weak self] timer in
       guard let self = self else { timer.invalidate(); return }
 
       self.reconnectAttempts += 1
       print("[ExpoLiveStreamPlayer] reconnect poll \(self.reconnectAttempts)/\(self.maxReconnectAttempts)")
 
       if self.reconnectAttempts >= self.maxReconnectAttempts {
-        // Give up
         timer.invalidate()
         self.reconnectTimer = nil
         self.isPlaying = false
@@ -246,7 +282,6 @@ class PlayerView: ExpoView, VLCMediaPlayerDelegate {
         return
       }
 
-      // Try fresh connection with new media
       self.mediaPlayer?.stop()
 
       let connectUrl = self.buildConnectUrl()
@@ -263,10 +298,9 @@ class PlayerView: ExpoView, VLCMediaPlayerDelegate {
     reconnectAttempts = 0
   }
 
-  private var lastReportedState = ""
-
   func mediaPlayerTimeChanged(_ aNotification: Notification) {
     guard let player = mediaPlayer, player.isPlaying else { return }
+    lastFrameTime = Date().timeIntervalSince1970
     if lastReportedState != "playing" {
       lastReportedState = "playing"
       onPlayerStateChanged(["state": "playing"])
@@ -276,13 +310,13 @@ class PlayerView: ExpoView, VLCMediaPlayerDelegate {
   // MARK: - Cleanup (matches Android cleanup + onDetachedFromWindow)
 
   private func cleanup() {
-    reconnectTimer?.invalidate()
-    reconnectTimer = nil
+    stopStallChecker()
+    stopReconnectPoller()
     if let observer = orientationObserver {
       NotificationCenter.default.removeObserver(observer)
       orientationObserver = nil
     }
-    isPlaying = false // Set BEFORE stop() to prevent VLC delegate from starting reconnect poller
+    isPlaying = false
     mediaPlayer?.stop()
     mediaPlayer?.delegate = nil
     mediaPlayer = nil

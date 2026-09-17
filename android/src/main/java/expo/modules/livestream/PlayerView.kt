@@ -51,11 +51,16 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
   private var pendingPlay = false
   private var lastReportedState = ""
 
-  // Auto-reconnect (matches iOS — 3 attempts)
+  // Auto-reconnect (up to 10 attempts ~35s tolerance for server/network glitches)
   private var reconnectAttempts = 0
-  private val maxReconnectAttempts = 3
+  private val maxReconnectAttempts = 10
   private var reconnectHandler: Handler? = null
   private var reconnectRunnable: Runnable? = null
+
+  // Silent stall watchdog — detects if video frames stop arriving for >8s
+  @Volatile private var lastFrameTime = 0L
+  private var stallCheckHandler: Handler? = null
+  private var stallCheckRunnable: Runnable? = null
 
   init {
     activeInstance = this
@@ -132,9 +137,10 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
   }
 
   private fun buildConnectUrl(): String {
-    var connectUrl = url
-    if (streamName.isNotEmpty() && !connectUrl.endsWith("/$streamName")) {
-      connectUrl = "$connectUrl/$streamName"
+    var connectUrl = url.trim()
+    val playName = streamName.trim()
+    if (playName.isNotEmpty() && !connectUrl.endsWith("/")) {
+      connectUrl = if (connectUrl.endsWith("/")) "" else "/"
     }
     return connectUrl
   }
@@ -143,19 +149,26 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
     val vlc = ensureVLC()
     val media = Media(vlc, Uri.parse(connectUrl))
     media.setHWDecoderEnabled(true, false)
+    // Media-level options guarantee VLC applies them specifically to this RTMP/stream session
+    media.addOption(":network-caching=1500")
+    media.addOption(":live-caching=1500")
+    media.addOption(":file-caching=300")
+    media.addOption(":rtmp-buffer=100")
+    media.addOption(":clock-jitter=0")
+    media.addOption(":clock-synchro=0")
+    media.addOption(":codec=all")
     return media
   }
 
   private fun ensureVLC(): LibVLC {
     libVLC?.let { return it }
     val options = arrayListOf(
-      "--network-caching=100",
-      "--live-caching=100",
+      "--network-caching=1500",
+      "--live-caching=1500",
+      "--file-caching=300",
+      "--rtmp-buffer=100",
       "--clock-jitter=0",
-      "--clock-synchro=0",
-      "--file-caching=0",
-      "--drop-late-frames",
-      "--skip-frames"
+      "--clock-synchro=0"
     )
     val vlc = LibVLC(context, options)
     libVLC = vlc
@@ -171,6 +184,7 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
       when (event.type) {
         MediaPlayer.Event.Playing -> {
           post {
+            lastFrameTime = System.currentTimeMillis()
             if (lastReportedState != "playing") {
               Log.d(TAG, "VLC: Playing")
               lastReportedState = "playing"
@@ -204,9 +218,10 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
             if (isPlaying) startReconnectPoller()
           }
         }
-        // TimeChanged fires every frame — only emit if we haven't reported "playing" yet
+        // TimeChanged fires every frame — updates watchdog and emits playing if needed
         MediaPlayer.Event.TimeChanged -> {
           if (player.isPlaying) {
+            lastFrameTime = System.currentTimeMillis()
             post {
               if (lastReportedState != "playing") {
                 lastReportedState = "playing"
@@ -280,6 +295,7 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
       media.release()
       player.play()
       isPlaying = true
+      startStallChecker()
     } catch (e: Exception) {
       Log.e(TAG, "play failed", e)
       onPlayerError(mapOf("msg" to (e.message ?: "Unknown error")))
@@ -291,6 +307,7 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
     post {
       if (!isPlaying && mediaPlayer == null) return@post
       isPlaying = false
+      stopStallChecker()
       stopReconnectPoller()
       try {
         mediaPlayer?.stop()
@@ -324,13 +341,42 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
         isPlaying = true
         lastReportedState = "connecting"
         onPlayerStateChanged(mapOf("state" to "connecting"))
+        startStallChecker()
       } catch (e: Exception) {
         Log.e(TAG, "resume failed", e)
       }
     }
   }
 
-  // Smart Reconnect (matches iOS — 5s interval, 3 max)
+  // Silent stall watchdog — checks every 3s if frames stopped coming while in playing state
+  private fun startStallChecker() {
+    if (stallCheckHandler != null) return
+    lastFrameTime = System.currentTimeMillis()
+    stallCheckHandler = Handler(Looper.getMainLooper())
+    stallCheckRunnable = object : Runnable {
+      override fun run() {
+        if (isPlaying && lastReportedState == "playing" && lastFrameTime > 0L) {
+          val elapsed = System.currentTimeMillis() - lastFrameTime
+          if (elapsed > 8000L) {
+            Log.w(TAG, "VLC: Stream stalled ($elapsed ms without frame), triggering auto-reconnect")
+            lastFrameTime = 0L
+            startReconnectPoller()
+          }
+        }
+        stallCheckHandler?.postDelayed(this, 3000L)
+      }
+    }
+    stallCheckHandler?.postDelayed(stallCheckRunnable!!, 3000L)
+  }
+
+  private fun stopStallChecker() {
+    stallCheckRunnable?.let { stallCheckHandler?.removeCallbacks(it) }
+    stallCheckHandler = null
+    stallCheckRunnable = null
+    lastFrameTime = 0L
+  }
+
+  // Smart Reconnect (matches iOS — 3.5s interval, 10 max attempts ~35s resilience)
   private fun startReconnectPoller() {
     if (reconnectHandler != null) return
     reconnectAttempts = 0
@@ -339,6 +385,7 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
     reconnectRunnable = object : Runnable {
       override fun run() {
         reconnectAttempts++
+        Log.d(TAG, "reconnect attempt $reconnectAttempts/$maxReconnectAttempts")
         if (reconnectAttempts >= maxReconnectAttempts) {
           stopReconnectPoller()
           isPlaying = false
@@ -355,10 +402,10 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
         } catch (e: Exception) {
           Log.e(TAG, "reconnect failed", e)
         }
-        reconnectHandler?.postDelayed(this, 5000)
+        reconnectHandler?.postDelayed(this, 3500L)
       }
     }
-    reconnectHandler?.postDelayed(reconnectRunnable!!, 5000)
+    reconnectHandler?.postDelayed(reconnectRunnable!!, 3500L)
   }
 
   private fun stopReconnectPoller() {
@@ -369,6 +416,7 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
   }
 
   private fun cleanup() {
+    stopStallChecker()
     stopReconnectPoller()
     isPlaying = false // Set BEFORE stop() to prevent VLC callback from starting reconnect poller
     try {
