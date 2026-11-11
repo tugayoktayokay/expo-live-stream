@@ -239,6 +239,17 @@ public class PlayerView: PlayerBaseView {
     liveInstances.removeAll { $0.value == nil || $0.value === view }
   }
 
+  /// A mounted view is not necessarily playing, so "is anything else using the
+  /// audio session" has to look at playback state, not at registration.
+  private static func isAnotherInstancePlaying(besides view: PlayerView) -> Bool {
+    instancesLock.lock()
+    defer { instancesLock.unlock() }
+    return liveInstances.contains {
+      guard let other = $0.value, other !== view else { return false }
+      return other.isPlaying
+    }
+  }
+
   private var connection: RTMPConnection?
   private var stream: RTMPStream?
   private let audioRenderer = AudioRenderer()
@@ -438,10 +449,11 @@ public class PlayerView: PlayerBaseView {
   }
 
   /// Only hands the session back if nothing else has claimed it since, so
-  /// tearing down a player cannot silence a publisher or sibling player that is
-  /// still live.
+  /// stopping a player cannot silence a publisher or a sibling player that is
+  /// still playing. A sibling that is merely mounted does not count.
   private func releaseAudioSession() {
-    guard PublisherView.activeInstance == nil, PlayerView.activeInstance == nil else { return }
+    guard PublisherView.activeInstance == nil,
+          !PlayerView.isAnotherInstancePlaying(besides: self) else { return }
     let session = AVAudioSession.sharedInstance()
     guard session.category == .playback else { return }
     try? session.setActive(false, options: [.notifyOthersOnDeactivation])
@@ -510,6 +522,7 @@ public class PlayerView: PlayerBaseView {
     stopStallChecker()
     stopReconnectPoller()
     teardownStream()
+    releaseAudioSession()
     lastReportedState = "stopped"
     emitPlayerStateChanged(["state": "stopped"])
   }
