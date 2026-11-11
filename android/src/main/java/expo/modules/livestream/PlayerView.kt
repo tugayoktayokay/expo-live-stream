@@ -1,271 +1,296 @@
 package expo.modules.livestream
 
 import android.content.Context
+import android.graphics.Matrix
 import android.graphics.SurfaceTexture
-import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import android.view.Surface
 import android.view.TextureView
 import android.view.ViewGroup
 import android.widget.LinearLayout
-import expo.modules.kotlin.AppContext
-import expo.modules.kotlin.views.ExpoView
-import expo.modules.kotlin.viewevent.EventDispatcher
-import org.videolan.libvlc.LibVLC
-import org.videolan.libvlc.Media
-import org.videolan.libvlc.MediaPlayer
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.common.VideoSize
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.rtmp.RtmpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import java.util.concurrent.CopyOnWriteArrayList
 
-class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, appContext) {
+@UnstableApi
+class PlayerView(context: Context) : LinearLayout(context) {
 
   companion object {
     private const val TAG = "ExpoLiveStreamPlayer"
+
+    /** See [PublisherView.activeInstance]: same stack, same reasoning. */
+    private val liveInstances = CopyOnWriteArrayList<PlayerView>()
+
+    @JvmStatic
+    val activeInstance: PlayerView?
+      get() = liveInstances.lastOrNull()
+
     /**
-     * Singleton reference — only one player view can be active at a time.
-     * This is intentional for live stream playback (one viewer per screen).
-     * The instance is set on init and cleared on detach/cleanup.
+     * RTMP carries no seekable timeline, so ExoPlayer treats it as a
+     * progressive stream and happily lets the playhead fall behind whatever it
+     * has buffered. Left alone the lag grows for the whole session, which is
+     * exactly what a live viewer must not see, so playback is nudged back to
+     * the buffered edge once it drifts past this.
      */
-    var activeInstance: PlayerView? = null
-      private set
+    private const val MAX_LIVE_DRIFT_MS = 2500L
+    private const val TARGET_LIVE_DRIFT_MS = 600L
+    private const val EXTREME_LIVE_DRIFT_MS = 15000L
+    /** How often the watchdog looks at drift and at the frame clock. */
+    private const val TICK_MS = 1000L
+
+    /** No rendered frame for this long while playing counts as a stall. */
+    private const val STALL_TIMEOUT_MS = 8000L
   }
 
-  // VLC
-  private var libVLC: LibVLC? = null
-  private var mediaPlayer: MediaPlayer? = null
+  private var player: ExoPlayer? = null
   private var textureView: TextureView? = null
-  private var surface: Surface? = null
   private var surfaceReady = false
-
-  // Props
+  private var videoWidth = 0
+  private var videoHeight = 0
+  private var isSpeedAdjusted = false
   var url: String = ""
   var streamName: String = ""
 
-  // Events
-  val onPlayerStateChanged by EventDispatcher()
-  val onPlayerError by EventDispatcher()
+  private fun onPlayerStateChanged(data: Map<String, Any?>) =
+    emitViewEvent(this, "onPlayerStateChanged", data)
+  private fun onPlayerError(data: Map<String, Any?>) =
+    emitViewEvent(this, "onPlayerError", data)
 
-  // State (matches iOS)
-  private var isPlaying = false
+  @Volatile private var isPlaying = false
   private var lastPlayRequestAt = 0L
   private var pendingPlay = false
   private var lastReportedState = ""
 
-  // Auto-reconnect (up to 10 attempts ~35s tolerance for server/network glitches)
   private var reconnectAttempts = 0
   private val maxReconnectAttempts = 10
   private var reconnectHandler: Handler? = null
   private var reconnectRunnable: Runnable? = null
 
-  // Silent stall watchdog — detects if video frames stop arriving for >8s
   @Volatile private var lastFrameTime = 0L
   private var stallCheckHandler: Handler? = null
   private var stallCheckRunnable: Runnable? = null
 
   init {
-    activeInstance = this
-    Log.d(TAG, "View created, activeInstance set")
+    liveInstances.add(this)
     setupView()
   }
 
+  override fun onAttachedToWindow() {
+    super.onAttachedToWindow()
+    liveInstances.remove(this)
+    liveInstances.add(this)
+  }
+
+  /**
+   * A TextureView, not media3's own PlayerView: the latter renders into a
+   * SurfaceView, which punches through the view hierarchy and misbehaves when
+   * React Native reparents or animates the view.
+   */
   private fun setupView() {
     textureView = TextureView(context).apply {
-      layoutParams = LinearLayout.LayoutParams(
+      layoutParams = LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT,
         ViewGroup.LayoutParams.MATCH_PARENT
       )
       surfaceTextureListener = object : TextureView.SurfaceTextureListener {
         override fun onSurfaceTextureAvailable(st: SurfaceTexture, width: Int, height: Int) {
-          Log.d(TAG, "TextureView surface available: ${width}x${height}")
-          surface = Surface(st)
           surfaceReady = true
-          // Re-attach surface to existing player if it was detached (e.g. after rotation)
-          mediaPlayer?.let { player ->
-            val vout = player.vlcVout
-            if (!vout.areViewsAttached()) {
-              vout.setVideoSurface(surface, null)
-              if (width > 0 && height > 0) vout.setWindowSize(width, height)
-              vout.attachViews()
-              player.videoScale = MediaPlayer.ScaleType.SURFACE_FILL
-              Log.d(TAG, "VLC surface re-attached after recreation")
-            }
-          }
+          player?.setVideoTextureView(this@apply)
           if (pendingPlay) {
             pendingPlay = false
             doPlay()
           }
         }
+
         override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, width: Int, height: Int) {
-          Log.d(TAG, "TextureView size changed: ${width}x${height}")
-          // Update VLC with actual surface dimensions (more precise than onLayout)
-          mediaPlayer?.let { player ->
-            player.vlcVout.setWindowSize(width, height)
-            player.videoScale = MediaPlayer.ScaleType.SURFACE_FILL
-          }
+          updateTextureViewTransform()
         }
+
         override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
-          Log.d(TAG, "SurfaceTexture destroyed")
           surfaceReady = false
-          try {
-            mediaPlayer?.vlcVout?.detachViews()
-          } catch (_: Exception) {}
-          surface?.release()
-          surface = null
+          player?.setVideoTextureView(null)
           return true
         }
-        override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
+
+        // Fires once per rendered frame, which is what the stall watchdog needs:
+        // the player can sit in STATE_READY while the server has gone quiet.
+        override fun onSurfaceTextureUpdated(st: SurfaceTexture) {
+          lastFrameTime = System.currentTimeMillis()
+        }
       }
     }
     addView(textureView)
   }
 
-  // Layout change (rotation) — just update VLC window size, surface stays alive
-  // (configChanges in AndroidManifest prevents Activity recreation)
   override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
     super.onLayout(changed, l, t, r, b)
-    if (changed) {
-      val w = r - l
-      val h = b - t
-      if (w > 0 && h > 0) {
-        Log.d(TAG, "onLayout: ${w}x${h}")
-        mediaPlayer?.let { player ->
-          player.vlcVout.setWindowSize(w, h)
-          player.videoScale = MediaPlayer.ScaleType.SURFACE_FILL
-        }
-      }
+    val w = r - l
+    val h = b - t
+    if (w > 0 && h > 0) {
+      textureView?.layout(0, 0, w, h)
+      updateTextureViewTransform()
     }
+  }
+
+  private fun updateTextureViewTransform() {
+    val tv = textureView ?: return
+    val viewWidth = tv.width.toFloat()
+    val viewHeight = tv.height.toFloat()
+    if (viewWidth <= 0f || viewHeight <= 0f || videoWidth <= 0 || videoHeight <= 0) return
+
+    val viewRatio = viewWidth / viewHeight
+    val videoRatio = videoWidth.toFloat() / videoHeight.toFloat()
+    val scaleX: Float
+    val scaleY: Float
+    if (videoRatio > viewRatio) {
+      scaleX = videoRatio / viewRatio
+      scaleY = 1f
+    } else {
+      scaleX = 1f
+      scaleY = viewRatio / videoRatio
+    }
+    val matrix = Matrix()
+    matrix.setScale(scaleX, scaleY, viewWidth / 2f, viewHeight / 2f)
+    tv.setTransform(matrix)
   }
 
   private fun buildConnectUrl(): String {
     var connectUrl = url.trim()
-    val playName = streamName.trim()
-    if (playName.isNotEmpty() && !connectUrl.endsWith("/")) {
-      connectUrl = if (connectUrl.endsWith("/")) "" else "/"
+    val name = streamName.trim()
+    if (name.isNotEmpty() && !connectUrl.endsWith("/$name")) {
+      connectUrl = if (connectUrl.endsWith("/")) "$connectUrl$name" else "$connectUrl/$name"
     }
     return connectUrl
   }
 
-  private fun createMedia(connectUrl: String): Media {
-    val vlc = ensureVLC()
-    val media = Media(vlc, Uri.parse(connectUrl))
-    media.setHWDecoderEnabled(true, false)
-    // Media-level options guarantee VLC applies them specifically to this RTMP/stream session
-    media.addOption(":network-caching=1500")
-    media.addOption(":live-caching=1500")
-    media.addOption(":file-caching=300")
-    media.addOption(":rtmp-buffer=100")
-    media.addOption(":clock-jitter=0")
-    media.addOption(":clock-synchro=0")
-    media.addOption(":codec=all")
-    return media
-  }
+  private fun createPlayer(): ExoPlayer {
+    // The buffer has to be *large*, and the playhead kept at its edge. The
+    // obvious setting - a 2 s cap, so the viewer stays close to live - is a
+    // trap on RTMP: once the buffer is full ExoPlayer stops reading the
+    // socket, the TCP window closes, and the server's per-subscriber send
+    // queue overflows. nginx-rtmp answers that by dropping the subscriber
+    // ("client too slow"), which the viewer sees as a frozen picture that
+    // reconnects every few seconds. A publisher sending above the viewer's
+    // drain rate hits it within seconds.
+    //
+    // So: read greedily, never stall the socket, and let [trimLiveDrift] pull
+    // the playhead back to the live edge instead. Start playing from half a
+    // second of data so joining stays fast, and let the time thresholds win
+    // over the byte thresholds so a high-bitrate stream does not re-introduce
+    // the same back-pressure through the size cap.
+    val loadControl = DefaultLoadControl.Builder()
+      .setBufferDurationsMs(1_000, 60_000, 500, 1_000)
+      .setPrioritizeTimeOverSizeThresholds(true)
+      .setBackBuffer(0, false)
+      .build()
 
-  private fun ensureVLC(): LibVLC {
-    libVLC?.let { return it }
-    val options = arrayListOf(
-      "--network-caching=1500",
-      "--live-caching=1500",
-      "--file-caching=300",
-      "--rtmp-buffer=100",
-      "--clock-jitter=0",
-      "--clock-synchro=0"
-    )
-    val vlc = LibVLC(context, options)
-    libVLC = vlc
-    return vlc
-  }
+    val exo = ExoPlayer.Builder(context)
+      .setLoadControl(loadControl)
+      .build()
 
-  // Creates a new MediaPlayer, attaches the TextureView surface, sets FILL scale
-  private fun createAndAttachPlayer(): MediaPlayer {
-    val vlc = ensureVLC()
-    val player = MediaPlayer(vlc)
-
-    player.setEventListener { event ->
-      when (event.type) {
-        MediaPlayer.Event.Playing -> {
-          post {
-            lastFrameTime = System.currentTimeMillis()
-            if (lastReportedState != "playing") {
-              Log.d(TAG, "VLC: Playing")
-              lastReportedState = "playing"
-              onPlayerStateChanged(mapOf("state" to "playing"))
-            }
-            reconnectAttempts = 0
-            stopReconnectPoller()
-          }
-        }
-        MediaPlayer.Event.Buffering -> {
-          post {
-            if (lastReportedState != "buffering") {
+    exo.addListener(object : Player.Listener {
+      override fun onPlaybackStateChanged(playbackState: Int) {
+        when (playbackState) {
+          Player.STATE_BUFFERING -> post {
+            if (lastReportedState != "buffering" && lastReportedState != "connecting") {
               lastReportedState = "buffering"
               onPlayerStateChanged(mapOf("state" to "buffering"))
             }
           }
-        }
-        MediaPlayer.Event.EncounteredError -> {
-          post {
-            Log.e(TAG, "VLC: Error encountered")
-            if (isPlaying) startReconnectPoller()
-            else {
-              onPlayerError(mapOf("msg" to "VLC playback error"))
-              onPlayerStateChanged(mapOf("state" to "failed"))
-            }
-          }
-        }
-        MediaPlayer.Event.EndReached, MediaPlayer.Event.Stopped -> {
-          post {
-            Log.d(TAG, "VLC: EndReached/Stopped")
+          Player.STATE_READY -> post { reportPlaying() }
+          Player.STATE_ENDED -> post {
             if (isPlaying) startReconnectPoller()
           }
+          Player.STATE_IDLE -> {}
         }
-        // TimeChanged fires every frame — updates watchdog and emits playing if needed
-        MediaPlayer.Event.TimeChanged -> {
-          if (player.isPlaying) {
-            lastFrameTime = System.currentTimeMillis()
-            post {
-              if (lastReportedState != "playing") {
-                lastReportedState = "playing"
-                onPlayerStateChanged(mapOf("state" to "playing"))
-              }
-            }
+      }
+
+      override fun onVideoSizeChanged(videoSize: VideoSize) {
+        if (videoSize.width > 0 && videoSize.height > 0) {
+          videoWidth = videoSize.width
+          videoHeight = videoSize.height
+          post { updateTextureViewTransform() }
+        }
+      }
+
+      override fun onRenderedFirstFrame() {
+        lastFrameTime = System.currentTimeMillis()
+        post {
+          updateTextureViewTransform()
+          reportPlaying()
+        }
+      }
+
+      override fun onPlayerError(error: PlaybackException) {
+        Log.e(TAG, "player error: ${error.errorCodeName}", error)
+        post {
+          if (isPlaying && !isFatal(error)) {
+            startReconnectPoller()
+          } else {
+            // A stream this device cannot parse or decode will not become
+            // playable by reconnecting; retrying it on a timer only produces a
+            // stutter loop, so these fail immediately instead.
+            isPlaying = false
+            stopStallChecker()
+            stopReconnectPoller()
+            lastReportedState = "failed"
+            this@PlayerView.onPlayerError(mapOf("msg" to (error.message ?: error.errorCodeName)))
+            onPlayerStateChanged(mapOf("state" to "failed"))
           }
         }
       }
-    }
+    })
 
-    // Attach surface BEFORE play — set window size first for correct initial render
-    if (surfaceReady && surface != null) {
-      val vout = player.vlcVout
-      if (!vout.areViewsAttached()) {
-        vout.setVideoSurface(surface, null)
-        val w = this.width
-        val h = this.height
-        if (w > 0 && h > 0) vout.setWindowSize(w, h)
-        vout.attachViews()
-        Log.d(TAG, "VLC surface attached: ${w}x${h}")
-      }
-    }
-
-    // Set FILL immediately — no delay
-    player.videoScale = MediaPlayer.ScaleType.SURFACE_FILL
-
-    mediaPlayer = player
-    return player
+    textureView?.let { if (surfaceReady) exo.setVideoTextureView(it) }
+    player = exo
+    return exo
   }
 
-  private fun ensureMediaPlayer(): MediaPlayer {
-    mediaPlayer?.let { return it }
-    return createAndAttachPlayer()
+  /**
+   * Errors that mean "this stream cannot be played here" rather than "the
+   * network hiccuped". Reconnecting fixes the latter and never the former.
+   */
+  private fun isFatal(error: PlaybackException): Boolean = when (error.errorCode) {
+    PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+    PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED,
+    PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
+    PlaybackException.ERROR_CODE_DECODER_INIT_FAILED -> true
+    else -> false
   }
 
-  // Matches iOS play()
+  private fun reportPlaying() {
+    if (!isPlaying || lastReportedState == "playing") return
+    lastReportedState = "playing"
+    onPlayerStateChanged(mapOf("state" to "playing"))
+    reconnectAttempts = 0
+    stopReconnectPoller()
+  }
+
+  private fun ensurePlayer(): ExoPlayer = player ?: createPlayer()
+
+  private fun prepareAndPlay(exo: ExoPlayer, connectUrl: String) {
+    val source = ProgressiveMediaSource.Factory(RtmpDataSource.Factory())
+      .createMediaSource(MediaItem.fromUri(connectUrl))
+    exo.setMediaSource(source)
+    exo.prepare()
+    exo.playWhenReady = true
+  }
+
   fun play() {
     post {
       val now = System.currentTimeMillis()
       if (now - lastPlayRequestAt < 800L) return@post
       lastPlayRequestAt = now
 
-      if (isPlaying && mediaPlayer?.isPlaying == true) return@post
+      if (isPlaying && player?.isPlaying == true) return@post
 
       if (!surfaceReady) {
         pendingPlay = true
@@ -280,20 +305,18 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
   private fun doPlay() {
     val connectUrl = buildConnectUrl()
     if (connectUrl.isEmpty()) {
+      isPlaying = false
+      lastReportedState = "failed"
       onPlayerError(mapOf("msg" to "URL is empty"))
+      onPlayerStateChanged(mapOf("state" to "failed"))
       return
     }
 
-    Log.d(TAG, "play: url=$connectUrl")
     lastReportedState = "connecting"
     onPlayerStateChanged(mapOf("state" to "connecting"))
 
     try {
-      val player = ensureMediaPlayer()
-      val media = createMedia(connectUrl)
-      player.media = media
-      media.release()
-      player.play()
+      prepareAndPlay(ensurePlayer(), connectUrl)
       isPlaying = true
       startStallChecker()
     } catch (e: Exception) {
@@ -305,12 +328,15 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
 
   fun stop() {
     post {
-      if (!isPlaying && mediaPlayer == null) return@post
+      if (!isPlaying && player == null && !pendingPlay) return@post
+      pendingPlay = false
       isPlaying = false
+      lastPlayRequestAt = 0L
       stopStallChecker()
       stopReconnectPoller()
+      lastReportedState = "stopped"
       try {
-        mediaPlayer?.stop()
+        player?.stop()
         onPlayerStateChanged(mapOf("state" to "stopped"))
       } catch (e: Exception) {
         Log.e(TAG, "stop failed", e)
@@ -320,24 +346,29 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
 
   fun pause() {
     post {
-      val player = mediaPlayer ?: return@post
-      if (!player.isPlaying) return@post
-      player.pause()
+      val exo = player ?: return@post
+      if (!isPlaying) return@post
+      exo.playWhenReady = false
+      // Stop the watchdogs: they look at isPlaying/lastReportedState and would
+      // treat the absence of frames as a stall and silently restart playback.
+      isPlaying = false
+      stopStallChecker()
+      stopReconnectPoller()
+      lastReportedState = "paused"
       onPlayerStateChanged(mapOf("state" to "paused"))
     }
   }
 
-  // Matches iOS resume() — stop + re-play to jump to live edge
   fun resume() {
     post {
-      mediaPlayer?.stop()
+      // Resuming a live stream from where it was paused would replay stale
+      // frames, so the stream is re-prepared at the live edge instead.
       val connectUrl = buildConnectUrl()
+      if (connectUrl.isEmpty()) return@post
       try {
-        val player = ensureMediaPlayer()
-        val media = createMedia(connectUrl)
-        player.media = media
-        media.release()
-        player.play()
+        val exo = ensurePlayer()
+        exo.stop()
+        prepareAndPlay(exo, connectUrl)
         isPlaying = true
         lastReportedState = "connecting"
         onPlayerStateChanged(mapOf("state" to "connecting"))
@@ -348,7 +379,6 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
     }
   }
 
-  // Silent stall watchdog — checks every 3s if frames stopped coming while in playing state
   private fun startStallChecker() {
     if (stallCheckHandler != null) return
     lastFrameTime = System.currentTimeMillis()
@@ -357,16 +387,50 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
       override fun run() {
         if (isPlaying && lastReportedState == "playing" && lastFrameTime > 0L) {
           val elapsed = System.currentTimeMillis() - lastFrameTime
-          if (elapsed > 8000L) {
-            Log.w(TAG, "VLC: Stream stalled ($elapsed ms without frame), triggering auto-reconnect")
+          if (elapsed > STALL_TIMEOUT_MS) {
             lastFrameTime = 0L
             startReconnectPoller()
+          } else {
+            trimLiveDrift()
           }
         }
-        stallCheckHandler?.postDelayed(this, 3000L)
+        stallCheckHandler?.postDelayed(this, TICK_MS)
       }
     }
-    stallCheckHandler?.postDelayed(stallCheckRunnable!!, 3000L)
+    stallCheckHandler?.postDelayed(stallCheckRunnable!!, TICK_MS)
+  }
+
+  private fun trimLiveDrift() {
+    val exo = player ?: return
+    val buffered = exo.bufferedPosition
+    val current = exo.currentPosition
+    if (buffered <= 0L || current < 0L) return
+    val drift = buffered - current
+    // FlvExtractor reports SeekMap.Unseekable, so ProgressiveMediaPeriod clamps
+    // any exo.seekTo(...) target to 0 (seeking backward to the start or
+    // cancelling the RtmpDataSource loader). Catch up with a gentle playback
+    // rate nudge instead, and only re-prepare if lag has grown extreme.
+    if (drift > EXTREME_LIVE_DRIFT_MS) {
+      Log.d(TAG, "extreme live drift ${drift}ms, re-preparing at live edge")
+      isSpeedAdjusted = false
+      // Restart the frame clock so the stall watchdog does not read the
+      // re-prepare gap as a second, independent stall.
+      lastFrameTime = System.currentTimeMillis()
+      try {
+        exo.setPlaybackSpeed(1.0f)
+        exo.stop()
+        prepareAndPlay(exo, buildConnectUrl())
+      } catch (e: Exception) {
+        Log.e(TAG, "live edge re-prepare failed", e)
+      }
+    } else if (drift > MAX_LIVE_DRIFT_MS && !isSpeedAdjusted) {
+      Log.d(TAG, "live drift ${drift}ms, nudging playback speed to 1.06x")
+      isSpeedAdjusted = true
+      exo.setPlaybackSpeed(1.06f)
+    } else if (drift <= TARGET_LIVE_DRIFT_MS && isSpeedAdjusted) {
+      isSpeedAdjusted = false
+      exo.setPlaybackSpeed(1.0f)
+    }
   }
 
   private fun stopStallChecker() {
@@ -374,31 +438,34 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
     stallCheckHandler = null
     stallCheckRunnable = null
     lastFrameTime = 0L
+    if (isSpeedAdjusted) {
+      isSpeedAdjusted = false
+      try { player?.setPlaybackSpeed(1.0f) } catch (_: Exception) {}
+    }
   }
 
-  // Smart Reconnect (matches iOS — 3.5s interval, 10 max attempts ~35s resilience)
   private fun startReconnectPoller() {
     if (reconnectHandler != null) return
     reconnectAttempts = 0
     reconnectHandler = Handler(Looper.getMainLooper())
+    lastReportedState = "buffering"
     onPlayerStateChanged(mapOf("state" to "buffering"))
     reconnectRunnable = object : Runnable {
       override fun run() {
         reconnectAttempts++
-        Log.d(TAG, "reconnect attempt $reconnectAttempts/$maxReconnectAttempts")
         if (reconnectAttempts >= maxReconnectAttempts) {
           stopReconnectPoller()
+          stopStallChecker()
           isPlaying = false
+          lastReportedState = "failed"
           onPlayerError(mapOf("msg" to "Stream lost — reconnect failed"))
           onPlayerStateChanged(mapOf("state" to "failed"))
           return
         }
         try {
-          mediaPlayer?.stop()
-          val media = createMedia(buildConnectUrl())
-          mediaPlayer?.media = media
-          media.release()
-          mediaPlayer?.play()
+          val exo = ensurePlayer()
+          exo.stop()
+          prepareAndPlay(exo, buildConnectUrl())
         } catch (e: Exception) {
           Log.e(TAG, "reconnect failed", e)
         }
@@ -418,20 +485,17 @@ class PlayerView(context: Context, appContext: AppContext) : ExpoView(context, a
   private fun cleanup() {
     stopStallChecker()
     stopReconnectPoller()
-    isPlaying = false // Set BEFORE stop() to prevent VLC callback from starting reconnect poller
-    try {
-      mediaPlayer?.stop()
-      mediaPlayer?.vlcVout?.detachViews()
-      mediaPlayer?.release()
-      mediaPlayer = null
-      surface?.release()
-      surface = null
-      libVLC?.release()
-      libVLC = null
-    } catch (e: Exception) {
-      Log.e(TAG, "cleanup failed", e)
-    }
-    if (activeInstance == this) activeInstance = null
+    pendingPlay = false
+    isPlaying = false
+    // Each step is guarded on its own: one throwing call must not leave the
+    // player or its surface behind.
+    val exo = player
+    player = null
+    try { exo?.setVideoTextureView(null) } catch (e: Exception) { Log.w(TAG, "detach surface failed", e) }
+    try { exo?.stop() } catch (e: Exception) { Log.w(TAG, "player stop failed", e) }
+    try { exo?.release() } catch (e: Exception) { Log.w(TAG, "player release failed", e) }
+    surfaceReady = textureView?.isAvailable == true
+    liveInstances.remove(this)
   }
 
   override fun onDetachedFromWindow() {

@@ -1,16 +1,11 @@
-import {
-  requireNativeViewManager,
-  requireNativeModule,
-} from "expo-modules-core";
 import React, {
   forwardRef,
   useImperativeHandle,
   useRef,
   useEffect,
 } from "react";
-import { ViewProps } from "react-native";
-
-// ---- Types ----
+import { View, ViewProps } from "react-native";
+import { resolveNativeModule, resolveNativeView } from "./resolveNativeView";
 
 export type LiveStreamPlayerRef = {
   play: () => void;
@@ -43,15 +38,28 @@ export type LiveStreamPlayerProps = ViewProps & {
   onPlayerError?: (event: { nativeEvent: { msg: string } }) => void;
 };
 
-// ---- Native bindings ----
+const PLAYER_VIEW_CONFIG = {
+  uiViewClassName: "ExpoLiveStreamPlayer",
+  bubblingEventTypes: {},
+  directEventTypes: {
+    topPlayerStateChanged: { registrationName: "onPlayerStateChanged" },
+    topPlayerError: { registrationName: "onPlayerError" },
+  },
+  validAttributes: {
+    url: true,
+    streamName: true,
+  },
+};
 
-const NativeView = requireNativeViewManager("ExpoLiveStreamPlayer");
-const NativeModule = requireNativeModule("ExpoLiveStreamPlayer");
+const NativeView = resolveNativeView(PLAYER_VIEW_CONFIG);
+const NativeModule = resolveNativeModule<{
+  playerPlay: () => void;
+  playerStop: () => void;
+  playerPause: () => void;
+  playerResume: () => void;
+}>("ExpoLiveStreamPlayer");
 
-// ---- No-op handler (Fabric requires all events to be registered) ----
 const noop = () => {};
-
-// ---- Component ----
 
 const ExpoLiveStreamPlayerView = forwardRef<
   LiveStreamPlayerRef,
@@ -66,29 +74,32 @@ const ExpoLiveStreamPlayerView = forwardRef<
 
     useImperativeHandle(ref, () => ({
       play: () => {
-        NativeModule.playerPlay();
+        NativeModule?.playerPlay?.();
       },
       stop: () => {
-        NativeModule.playerStop();
+        NativeModule?.playerStop?.();
       },
       pause: () => {
-        NativeModule.playerPause();
+        NativeModule?.playerPause?.();
       },
       resume: () => {
-        NativeModule.playerResume();
+        NativeModule?.playerResume?.();
       },
     }));
 
-    // Auto-play support
     useEffect(() => {
       if (autoPlay && !hasAutoPlayed.current) {
         hasAutoPlayed.current = true;
         const timer = setTimeout(() => {
-          NativeModule.playerPlay();
+          NativeModule?.playerPlay?.();
         }, 500);
         return () => clearTimeout(timer);
       }
     }, [autoPlay]);
+
+    if (!NativeView) {
+      return <View {...props} ref={nativeRef} />;
+    }
 
     return (
       <NativeView

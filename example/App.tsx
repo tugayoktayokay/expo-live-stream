@@ -22,7 +22,7 @@ type Mode = "menu" | "publisher" | "player";
 
 export default function App() {
   const [mode, setMode] = useState<Mode>("menu");
-  const [rtmpUrl, setRtmpUrl] = useState("rtmp://192.168.0.53/live/test");
+  const [rtmpUrl, setRtmpUrl] = useState("rtmp://192.168.0.205/live/test");
 
   if (mode === "menu") {
     return (

@@ -1,49 +1,72 @@
+buildscript {
+  ext.safeExtGet = { prop, fallback ->
+    rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
+  }
+}
+
 apply plugin: 'com.android.library'
+apply plugin: 'org.jetbrains.kotlin.android'
 
 group = 'expo.modules.livestream'
+version = '1.4.1'
 
-def expoModulesCorePlugin = new File(project(":expo-modules-core").projectDir.absolutePath, "ExpoModulesCorePlugin.gradle")
-apply from: expoModulesCorePlugin
-applyKotlinExpoModulesCorePlugin()
-useCoreDependencies()
-useExpoPublishing()
-
-def useManagedAndroidSdkVersions = false
-if (useManagedAndroidSdkVersions) {
-  useDefaultAndroidSdkVersions()
-} else {
-  buildscript {
-    ext.safeExtGet = { prop, fallback ->
-      rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
-    }
-  }
-  project.android {
-    compileSdkVersion safeExtGet("compileSdkVersion", 36)
-    defaultConfig {
-      minSdkVersion safeExtGet("minSdkVersion", 24)
-      targetSdkVersion safeExtGet("targetSdkVersion", 36)
-    }
+def hasExpoModulesCore = rootProject.findProject(":expo-modules-core") != null
+if (hasExpoModulesCore) {
+  def expoModulesCorePlugin = new File(project(":expo-modules-core").projectDir.absolutePath, "ExpoModulesCorePlugin.gradle")
+  if (expoModulesCorePlugin.exists()) {
+    apply from: expoModulesCorePlugin
+    applyKotlinExpoModulesCorePlugin()
+    useCoreDependencies()
+    useExpoPublishing()
   }
 }
 
 android {
   namespace "expo.modules.livestream"
+  compileSdkVersion safeExtGet("compileSdkVersion", 36)
+
   defaultConfig {
+    minSdkVersion safeExtGet("minSdkVersion", 24)
+    targetSdkVersion safeExtGet("targetSdkVersion", 36)
     versionCode 1
-    versionName "1.0.0"
+    versionName "1.4.1"
     consumerProguardFiles("consumer-rules.pro")
   }
+
+  sourceSets {
+    main {
+      if (hasExpoModulesCore) {
+        java.srcDirs += 'src/expo/java'
+      }
+    }
+  }
+
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+
+  kotlinOptions {
+    jvmTarget = "17"
+  }
+
   lint {
     abortOnError false
   }
 }
 
 repositories {
+  google()
+  mavenCentral()
   maven { url 'https://jitpack.io' }
 }
 
 dependencies {
-  implementation 'com.github.pedroSG94.RootEncoder:library:2.6.7'
-  // VLC for RTMP playback — handles all RTMP sources reliably (matches iOS VLCKit)
-  implementation 'org.videolan.android:libvlc-all:3.6.5'
+  implementation "com.facebook.react:react-android"
+  implementation 'com.github.pedroSG94.RootEncoder:library:2.8.1'
+  // RTMP playback. `media3-ui` is deliberately absent: the player renders into
+  // this module's own TextureView, so its SurfaceView-based views are dead
+  // weight.
+  implementation 'androidx.media3:media3-exoplayer:1.11.1'
+  implementation 'androidx.media3:media3-datasource-rtmp:1.11.1'
 }

@@ -1,10 +1,12 @@
+import Foundation
+import React
+#if canImport(ExpoModulesCore)
 import ExpoModulesCore
 
 public class ExpoLiveStreamPlayerModule: Module {
   public func definition() -> ModuleDefinition {
     Name("ExpoLiveStreamPlayer")
 
-    // ======== Player Functions ========
     AsyncFunction("playerPlay") {
       await MainActor.run {
         PlayerView.activeInstance?.play()
@@ -29,7 +31,6 @@ public class ExpoLiveStreamPlayerModule: Module {
       }
     }
 
-    // ======== Player View ========
     View(PlayerView.self) {
       Events(
         "onPlayerStateChanged",
@@ -42,6 +43,42 @@ public class ExpoLiveStreamPlayerModule: Module {
       Prop("streamName") { (view: PlayerView, name: String) in
         view.streamName = name
       }
+    }
+  }
+}
+#endif
+
+@objc(ExpoLiveStreamPlayerRNViewManager)
+public class ExpoLiveStreamPlayerRNViewManager: RCTViewManager {
+  public override static func requiresMainQueueSetup() -> Bool {
+    return true
+  }
+
+  public override func view() -> UIView! {
+    return PlayerView()
+  }
+
+  @objc public func playerPlay() {
+    DispatchQueue.main.async {
+      PlayerView.activeInstance?.play()
+    }
+  }
+
+  @objc public func playerStop() {
+    DispatchQueue.main.async {
+      PlayerView.activeInstance?.stop()
+    }
+  }
+
+  @objc public func playerPause() {
+    DispatchQueue.main.async {
+      PlayerView.activeInstance?.pause()
+    }
+  }
+
+  @objc public func playerResume() {
+    DispatchQueue.main.async {
+      PlayerView.activeInstance?.resume()
     }
   }
 }

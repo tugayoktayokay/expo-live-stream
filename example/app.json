@@ -1,9 +1,18 @@
 {
   "android": {
-    "package": "com.anonymous.expolivestreamexample"
+    "package": "com.anonymous.expolivestreamexample",
+    "permissions": [
+      "CAMERA",
+      "RECORD_AUDIO",
+      "INTERNET"
+    ]
   },
   "ios": {
     "bundleIdentifier": "com.anonymous.expolivestreamexample",
-    "appleTeamId": "QS2YCK3J3E"
+    "appleTeamId": "QS2YCK3J3E",
+    "infoPlist": {
+      "NSCameraUsageDescription": "This example streams live video from your camera.",
+      "NSMicrophoneUsageDescription": "This example streams live audio from your microphone."
+    }
   }
 }

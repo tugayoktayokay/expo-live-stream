@@ -275,6 +275,8 @@ export function useLiveStream(options: UseLiveStreamOptions = {}): UseLiveStream
         reconnectCallbacksRef.current?.onReconnectAttempt?.(nextAttempt, reconnectConfig.maxRetries);
 
         reconnectTimerRef.current = setTimeout(() => {
+            reconnectTimerRef.current = null;
+            if (!wasStreamingRef.current) return;
             ref.current?.start(lastUrlRef.current);
         }, delay);
     }, [reconnectConfig]);
@@ -315,8 +317,10 @@ export function useLiveStream(options: UseLiveStreamOptions = {}): UseLiveStream
         (_event: any) => {
             setState('disconnected');
 
+            // The attempt counter is deliberately not reset here: a flapping
+            // connection would otherwise keep it at zero, so the backoff would
+            // never grow and maxRetries would never be reached.
             if (wasStreamingRef.current && reconnectConfig.enabled) {
-                reconnectAttemptRef.current = 0;
                 attemptReconnect();
             }
         },
@@ -341,13 +345,21 @@ export function useLiveStream(options: UseLiveStreamOptions = {}): UseLiveStream
 
     // ── Cleanup ──
     useEffect(() => {
-        const currentRef = ref.current;
-        const currentReconnectTimer = reconnectTimerRef.current;
-        const currentDurationTimer = durationTimerRef.current;
         return () => {
-            if (autoStopOnUnmount) currentRef?.stop();
-            if (currentReconnectTimer) clearTimeout(currentReconnectTimer);
-            if (currentDurationTimer) clearInterval(currentDurationTimer);
+            // Read the refs inside the cleanup: reading them in the effect body
+            // captured their mount-time values (null), so nothing was cleared.
+            wasStreamingRef.current = false;
+            isReconnectingRef.current = false;
+            if (reconnectTimerRef.current) {
+                clearTimeout(reconnectTimerRef.current);
+                reconnectTimerRef.current = null;
+            }
+            if (durationTimerRef.current) {
+                clearInterval(durationTimerRef.current);
+                durationTimerRef.current = null;
+            }
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+            if (autoStopOnUnmount) ref.current?.stop();
         };
     }, [autoStopOnUnmount]);
 
@@ -516,6 +528,8 @@ export function useLiveStreamPlayer(
         reconnectCallbacksRef.current?.onReconnectAttempt?.(nextAttempt, reconnectConfig.maxRetries);
 
         reconnectTimerRef.current = setTimeout(() => {
+            reconnectTimerRef.current = null;
+            if (!wasPlayingRef.current) return;
             ref.current?.play();
         }, delay);
     }, [reconnectConfig]);
@@ -560,11 +574,16 @@ export function useLiveStreamPlayer(
 
     // ── Cleanup ──
     useEffect(() => {
-        const currentRef = ref.current;
-        const currentReconnectTimer = reconnectTimerRef.current;
         return () => {
-            if (autoStopOnUnmount) currentRef?.stop();
-            if (currentReconnectTimer) clearTimeout(currentReconnectTimer);
+            // Read the refs inside the cleanup, not in the effect body.
+            wasPlayingRef.current = false;
+            isReconnectingRef.current = false;
+            if (reconnectTimerRef.current) {
+                clearTimeout(reconnectTimerRef.current);
+                reconnectTimerRef.current = null;
+            }
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+            if (autoStopOnUnmount) ref.current?.stop();
         };
     }, [autoStopOnUnmount]);
 

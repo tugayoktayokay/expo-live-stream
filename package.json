@@ -1,7 +1,7 @@
 {
   "name": "expo-live-stream",
-  "version": "1.4.0",
-  "description": "RTMP live stream publisher & player for React Native (Expo). Uses HaishinKit + VLC (iOS) and RootEncoder + VLC (Android).",
+  "version": "1.4.1",
+  "description": "RTMP live stream publisher & player for React Native (Expo). Uses HaishinKit (iOS) and RootEncoder + Media3/ExoPlayer (Android).",
   "main": "build/index.js",
   "types": "build/index.d.ts",
   "source": "src/index.ts",
@@ -23,7 +23,8 @@
     "player",
     "haishinkit",
     "rootencoder",
-    "vlc",
+    "media3",
+    "exoplayer",
     "camera",
     "streaming"
   ],
@@ -44,6 +45,8 @@
     "android/src",
     "android/build.gradle",
     "android/consumer-rules.pro",
+    "ExpoLiveStream.podspec",
+    "react-native.config.js",
     "expo-module.config.json"
   ],
   "devDependencies": {
@@ -53,7 +56,6 @@
     "expo-module-scripts": "^4.1.9"
   },
   "peerDependencies": {
-    "expo": "*",
     "react": "*",
     "react-native": "*"
   },

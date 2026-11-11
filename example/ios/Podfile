@@ -7,16 +7,20 @@ podfile_properties = JSON.parse(File.read(File.join(__dir__, 'Podfile.properties
 def ccache_enabled?(podfile_properties)
   # Environment variable takes precedence
   return ENV['USE_CCACHE'] == '1' if ENV['USE_CCACHE']
-  
+
   # Fall back to Podfile properties
   podfile_properties['apple.ccacheEnabled'] == 'true'
 end
 
-ENV['RCT_NEW_ARCH_ENABLED'] ||= '0' if podfile_properties['newArchEnabled'] == 'false'
 ENV['EX_DEV_CLIENT_NETWORK_INSPECTOR'] ||= podfile_properties['EX_DEV_CLIENT_NETWORK_INSPECTOR']
-ENV['RCT_USE_RN_DEP'] ||= '1' if podfile_properties['ios.buildReactNativeFromSource'] != 'true' && podfile_properties['newArchEnabled'] != 'false'
-ENV['RCT_USE_PREBUILT_RNCORE'] ||= '1' if podfile_properties['ios.buildReactNativeFromSource'] != 'true' && podfile_properties['newArchEnabled'] != 'false'
-platform :ios, podfile_properties['ios.deploymentTarget'] || '15.1'
+ENV['RCT_USE_RN_DEP'] ||= podfile_properties['ios.buildReactNativeFromSource'] == 'true' ? '0' : '1'
+ENV['RCT_USE_PREBUILT_RNCORE'] ||= podfile_properties['ios.buildReactNativeFromSource'] == 'true' ? '0' : '1'
+ENV['RCT_HERMES_V1_ENABLED'] ||= '0' if podfile_properties['expo.useHermesV1'] == 'false'
+# An explicit `ios.usePrecompiledModules: false` must win even when the env var is already set
+# (e.g. EXPO_USE_PRECOMPILED_MODULES exported by EAS Build), so force-disable here before the default.
+ENV['EXPO_USE_PRECOMPILED_MODULES'] = '0' if podfile_properties['EXPO_USE_PRECOMPILED_MODULES'] == 'false'
+ENV['EXPO_USE_PRECOMPILED_MODULES'] ||= '1'
+platform :ios, podfile_properties['ios.deploymentTarget'] || '16.4'
 
 prepare_react_native_project!
 
@@ -59,5 +63,23 @@ target 'expolivestreamexample' do
       :mac_catalyst_enabled => false,
       :ccache_enabled => ccache_enabled?(podfile_properties),
     )
+
+    require_relative '../../ios/patch-haishinkit'
+    patch_haishinkit_sources!(installer.sandbox.root)
+
+    # HaishinKit 2.0.9 calls assertionFailure() when an AMF0 value it expects to
+    # be a string arrives as another type, which nginx-rtmp does send while
+    # playing. assertionFailure traps only when assertions are enabled, so a
+    # Debug build dies on a message a Release build shrugs off. Compiling the
+    # pod with assertions off keeps debuggability everywhere else while making
+    # Debug behave like Release here. `precondition` and friends stay active.
+    installer.pods_project.targets.each do |target|
+      next unless target.name == 'HaishinKit'
+      target.build_configurations.each do |config|
+        flags = config.build_settings['OTHER_SWIFT_FLAGS'] || '$(inherited)'
+        next if flags.include?('-assert-config')
+        config.build_settings['OTHER_SWIFT_FLAGS'] = "#{flags} -assert-config Release"
+      end
+    end
   end
 end

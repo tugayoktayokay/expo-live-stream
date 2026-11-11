@@ -1,41 +1,96 @@
-import ExpoModulesCore
+import UIKit
+import React
 import AVFoundation
 import HaishinKit
 import VideoToolbox
+#if canImport(ExpoModulesCore)
+import ExpoModulesCore
+public typealias PublisherBaseView = ExpoView
+#else
+public typealias PublisherBaseView = UIView
+#endif
 
-class PublisherView: ExpoView {
+private final class WeakPublisherBox {
+  weak var value: PublisherView?
+  init(_ value: PublisherView) { self.value = value }
+}
 
-  // MARK: - Active Instance tracking
-  /// Singleton reference — only one publisher can be active at a time.
-  /// This is intentional: live streaming uses a single camera source.
-  /// The instance is set on init and cleared on removeFromSuperview.
-  static weak var activeInstance: PublisherView?
+@objc(PublisherView)
+public class PublisherView: PublisherBaseView {
 
-  // MARK: - RTMP objects
+  /// Commands arrive on the native module, not on a view, so they target
+  /// "the" active view. Tracking every live view as a stack (most recently
+  /// attached last) sends them to the one actually on screen, and a view
+  /// going away hands the role back instead of dropping it.
+  private static let instancesLock = NSLock()
+  private static var liveInstances: [WeakPublisherBox] = []
+
+  static var activeInstance: PublisherView? {
+    instancesLock.lock()
+    defer { instancesLock.unlock() }
+    return liveInstances.compactMap { $0.value }.last
+  }
+
+  private static func register(_ view: PublisherView) {
+    instancesLock.lock()
+    defer { instancesLock.unlock() }
+    liveInstances.removeAll { $0.value == nil || $0.value === view }
+    liveInstances.append(WeakPublisherBox(view))
+  }
+
+  private static func unregister(_ view: PublisherView) {
+    instancesLock.lock()
+    defer { instancesLock.unlock() }
+    liveInstances.removeAll { $0.value == nil || $0.value === view }
+  }
+
   private var connection: RTMPConnection?
   private var stream: RTMPStream?
   private var mixer: MediaMixer?
   private var hkView: MTHKView?
 
-  // MARK: - Props
-  var url: String = ""
-  var streamKey: String = ""
-  var videoWidth: Int = 720
-  var videoHeight: Int = 1280
-  var videoBitrate: Int = 2_000_000
-  var videoFps: Float64 = 30.0
-  var audioBitrate: Int = 128_000
-  var audioSampleRate: Double = 44100.0
+  @objc public var url: String = ""
+  @objc public var streamKey: String = ""
+  @objc public var videoWidth: Int = 720
+  @objc public var videoHeight: Int = 1280
+  @objc public var videoBitrate: Int = 2_000_000
+  @objc public var videoFps: Float64 = 30.0
+  @objc public var audioBitrate: Int = 128_000
+  @objc public var audioSampleRate: Double = 44100.0
+  @objc public var frontCamera: Bool = true {
+    didSet {
+      isFrontCamera = frontCamera
+      updateMirror()
+    }
+  }
   var isFrontCamera: Bool = true
 
-  // MARK: - Event emitters
+  #if canImport(ExpoModulesCore)
   let onConnectionSuccess = EventDispatcher()
   let onConnectionFailed = EventDispatcher()
   let onDisconnect = EventDispatcher()
   let onStreamStateChanged = EventDispatcher()
   let onBitrateUpdate = EventDispatcher()
 
-  // MARK: - State
+  private func emitConnectionSuccess(_ data: [String: Any] = [:]) { onConnectionSuccess(data) }
+  private func emitConnectionFailed(_ data: [String: Any]) { onConnectionFailed(data) }
+  private func emitDisconnect(_ data: [String: Any] = [:]) { onDisconnect(data) }
+  private func emitStreamStateChanged(_ data: [String: Any]) { onStreamStateChanged(data) }
+  private func emitBitrateUpdate(_ data: [String: Any]) { onBitrateUpdate(data) }
+  #else
+  @objc public var onConnectionSuccess: RCTDirectEventBlock?
+  @objc public var onConnectionFailed: RCTDirectEventBlock?
+  @objc public var onDisconnect: RCTDirectEventBlock?
+  @objc public var onStreamStateChanged: RCTDirectEventBlock?
+  @objc public var onBitrateUpdate: RCTDirectEventBlock?
+
+  private func emitConnectionSuccess(_ data: [String: Any] = [:]) { onConnectionSuccess?(data) }
+  private func emitConnectionFailed(_ data: [String: Any]) { onConnectionFailed?(data) }
+  private func emitDisconnect(_ data: [String: Any] = [:]) { onDisconnect?(data) }
+  private func emitStreamStateChanged(_ data: [String: Any]) { onStreamStateChanged?(data) }
+  private func emitBitrateUpdate(_ data: [String: Any]) { onBitrateUpdate?(data) }
+  #endif
+
   private var isStreaming = false
   private var isPreviewStarted = false
   private var isMuted = false
@@ -46,21 +101,33 @@ class PublisherView: ExpoView {
   private var lastStreamUrl: String?
   private var lastMirrorFront: Bool?
 
-  // MARK: - Init
+  #if canImport(ExpoModulesCore)
   required public init(appContext: AppContext? = nil) {
     super.init(appContext: appContext)
-    PublisherView.activeInstance = self
+    PublisherView.register(self)
     setupStream()
     setupLifecycleObservers()
   }
+  #else
+  public override init(frame: CGRect) {
+    super.init(frame: frame)
+    PublisherView.register(self)
+    setupStream()
+    setupLifecycleObservers()
+  }
+  #endif
 
   @available(*, unavailable)
   required init?(coder: NSCoder) {
     fatalError("init(coder:) has not been implemented")
   }
 
-  // MARK: - Lifecycle
-  override func layoutSubviews() {
+  public override func didMoveToWindow() {
+    super.didMoveToWindow()
+    if window != nil { PublisherView.register(self) }
+  }
+
+  public override func layoutSubviews() {
     super.layoutSubviews()
     hkView?.frame = bounds
     if !isPreviewStarted && bounds.width > 0 && bounds.height > 0 {
@@ -85,7 +152,6 @@ class PublisherView: ExpoView {
   }
 
   @objc private func appWillResignActive() {
-    print("[ExpoLiveStream] App going to background")
     wasStreamingBeforeBackground = isStreaming
     if isStreaming {
       isStreaming = false
@@ -95,7 +161,6 @@ class PublisherView: ExpoView {
         _ = try? await connection?.close()
       }
     }
-    // Detach camera (iOS requires this in background)
     if let mixer = mixer {
       Task {
         try? await mixer.attachVideo(nil)
@@ -104,52 +169,45 @@ class PublisherView: ExpoView {
   }
 
   @objc private func appDidBecomeActive() {
-    print("[ExpoLiveStream] App returning to foreground")
+    guard isPreviewStarted, let mixer = mixer else { return }
     let position: AVCaptureDevice.Position = isFrontCamera ? .front : .back
     let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
+    let shouldResume = wasStreamingBeforeBackground
+    wasStreamingBeforeBackground = false
+    let oldStream = shouldResume ? self.stream : nil
 
-    if let mixer = mixer {
-      let oldStream = self.stream
-
-      Task {
+    Task {
+      if shouldResume {
         _ = try? await oldStream?.close()
         _ = try? await self.connection?.close()
-
-        // Remove stale stream output before creating a new one
         if let old = oldStream {
           await mixer.removeOutput(old)
         }
+      }
 
-        do {
-          try await mixer.attachVideo(camera)
-        } catch {
-          print("[ExpoLiveStream] Camera reattach error: \(error)")
+      do {
+        try await mixer.attachVideo(camera)
+      } catch {
+        print("[ExpoLiveStream] Camera reattach error: \(error)")
+      }
+
+      if shouldResume {
+        let conn = RTMPConnection()
+        let newStream = RTMPStream(connection: conn)
+        await mixer.addOutput(newStream)
+        await MainActor.run {
+          self.connection = conn
+          self.stream = newStream
         }
-
-        if self.wasStreamingBeforeBackground {
-          self.wasStreamingBeforeBackground = false
-          await MainActor.run {
-            print("[ExpoLiveStream] Resuming stream after background")
-            let conn = RTMPConnection()
-            self.connection = conn
-            self.stream = RTMPStream(connection: conn)
-
-            if let stream = self.stream {
-              Task {
-                await mixer.addOutput(stream)
-                try? await Task.sleep(nanoseconds: 300_000_000)
-                await MainActor.run {
-                  self.start(urlOverride: self.lastStreamUrl)
-                }
-              }
-            }
-          }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        await MainActor.run {
+          guard UIApplication.shared.applicationState == .active, !self.isStreaming else { return }
+          self.start(urlOverride: self.lastStreamUrl)
         }
       }
     }
   }
 
-  // MARK: - Mirror
   private func updateMirror() {
     guard lastMirrorFront != isFrontCamera else { return }
     lastMirrorFront = isFrontCamera
@@ -160,16 +218,24 @@ class PublisherView: ExpoView {
     }
   }
 
-  // MARK: - Setup
   private func setupStream() {
     let conn = RTMPConnection()
     connection = conn
     stream = RTMPStream(connection: conn)
     mixer = MediaMixer()
 
+    // .allowBluetoothHFP is the current spelling; older SDKs only know
+    // .allowBluetooth, so pick the one the toolchain actually has.
+    var audioOptions: AVAudioSession.CategoryOptions = [.defaultToSpeaker]
+    #if compiler(>=6.2)
+    audioOptions.insert(.allowBluetoothHFP)
+    #else
+    audioOptions.insert(.allowBluetooth)
+    #endif
+
     let session = AVAudioSession.sharedInstance()
     do {
-      try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
+      try session.setCategory(.playAndRecord, mode: .default, options: audioOptions)
       try session.setActive(true)
     } catch {
       print("[ExpoLiveStream] Audio session error: \(error)")
@@ -189,7 +255,6 @@ class PublisherView: ExpoView {
     }
   }
 
-  // MARK: - Preview
   private func startPreview() {
     guard !isPreviewStarted else { return }
     isPreviewStarted = true
@@ -212,36 +277,41 @@ class PublisherView: ExpoView {
     }
   }
 
-  // MARK: - Public Methods
   func start(urlOverride: String?) {
-    let targetUrl: String
+    let rawUrl: String
     if let override = urlOverride, !override.isEmpty {
-      targetUrl = override
+      rawUrl = override
     } else {
-      targetUrl = url
+      rawUrl = url
     }
 
+    let trimmedUrl = rawUrl.trimmingCharacters(in: .whitespacesAndNewlines)
+    let targetUrl = trimmedUrl.hasSuffix("/") ? String(trimmedUrl.dropLast()) : trimmedUrl
+
     guard !targetUrl.isEmpty else {
-      onConnectionFailed(["msg": "URL is empty"])
+      emitConnectionFailed(["msg": "URL is empty"])
+      emitStreamStateChanged(["state": "failed"])
       return
     }
 
     var connectUrl = targetUrl
-    var publishKey = streamKey
+    var publishKey = streamKey.trimmingCharacters(in: .whitespacesAndNewlines)
 
-    if publishKey.isEmpty {
-      if let lastSlashRange = targetUrl.range(of: "/", options: .backwards) {
-        let pathAfterLastSlash = String(targetUrl[lastSlashRange.upperBound...])
-        if !pathAfterLastSlash.isEmpty {
-          publishKey = pathAfterLastSlash
-          connectUrl = String(targetUrl[..<lastSlashRange.lowerBound])
-        }
+    if !publishKey.isEmpty {
+      if connectUrl.hasSuffix("/\(publishKey)") {
+        connectUrl = String(connectUrl.dropLast(publishKey.count + 1))
+      }
+    } else if let lastSlashRange = targetUrl.range(of: "/", options: .backwards) {
+      let pathAfterLastSlash = String(targetUrl[lastSlashRange.upperBound...])
+      if !pathAfterLastSlash.isEmpty {
+        publishKey = pathAfterLastSlash
+        connectUrl = String(targetUrl[..<lastSlashRange.lowerBound])
       }
     }
 
     isStreaming = true
     lastStreamUrl = targetUrl
-    onStreamStateChanged(["state": "connecting"])
+    emitStreamStateChanged(["state": "connecting"])
 
     Task {
       do {
@@ -253,7 +323,7 @@ class PublisherView: ExpoView {
         )
         let audioSettings = AudioCodecSettings(
           bitRate: audioBitrate,
-          downmix: false  // Keep stereo for better ExoPlayer compatibility
+          downmix: false
         )
         await stream?.setVideoSettings(videoSettings)
         await stream?.setAudioSettings(audioSettings)
@@ -262,15 +332,16 @@ class PublisherView: ExpoView {
         _ = try await connection?.connect(connectUrl)
         _ = try await stream?.publish(publishKey)
         await MainActor.run {
-          self.onConnectionSuccess([:])
-          self.onStreamStateChanged(["state": "streaming"])
+          guard self.isStreaming else { return }
+          self.emitConnectionSuccess()
+          self.emitStreamStateChanged(["state": "streaming"])
           self.startBitrateTimer()
         }
       } catch {
         await MainActor.run {
           self.isStreaming = false
-          self.onConnectionFailed(["msg": error.localizedDescription])
-          self.onStreamStateChanged(["state": "failed"])
+          self.emitConnectionFailed(["msg": error.localizedDescription])
+          self.emitStreamStateChanged(["state": "failed"])
         }
       }
     }
@@ -287,15 +358,15 @@ class PublisherView: ExpoView {
       _ = try? await oldStream?.close()
       _ = try? await self.connection?.close()
 
-      // Remove stale outputs before creating new ones
       if let mixer = self.mixer, let old = oldStream {
         await mixer.removeOutput(old)
       }
 
       await MainActor.run {
-        self.onDisconnect([:])
-        self.onStreamStateChanged(["state": "stopped"])
+        self.emitDisconnect()
+        self.emitStreamStateChanged(["state": "stopped"])
 
+        guard !self.isStreaming else { return }
         let conn = RTMPConnection()
         self.connection = conn
         self.stream = RTMPStream(connection: conn)
@@ -310,17 +381,16 @@ class PublisherView: ExpoView {
   }
 
   func switchCamera() {
-    guard !isSwitchingCamera else {
-      print("[ExpoLiveStream] switchCamera: switch in progress, ignoring")
-      return
-    }
+    guard !isSwitchingCamera else { return }
     isSwitchingCamera = true
+    // Announce the transition so the JS layer can cover the preview while the
+    // camera is swapped; the resolved state follows when it settles.
+    emitStreamStateChanged(["state": "cameraSwitch"])
 
     let newPosition: AVCaptureDevice.Position = isFrontCamera ? .back : .front
     isFrontCamera = !isFrontCamera
     updateMirror()
 
-    // Flash auto-off for front camera
     if isFrontCamera && isFlashOn {
       if let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) {
         try? device.lockForConfiguration()
@@ -339,26 +409,23 @@ class PublisherView: ExpoView {
         } catch {
           print("[ExpoLiveStream] Switch camera error: \(error)")
         }
-        // Unlock on main thread after attach completes
         await MainActor.run {
           self.isSwitchingCamera = false
+          self.emitStreamStateChanged([
+            "state": self.isStreaming ? "streaming" : "idle"
+          ])
         }
       }
     } else {
       isSwitchingCamera = false
+      emitStreamStateChanged(["state": isStreaming ? "streaming" : "idle"])
     }
   }
 
   func toggleFlash() {
-    guard !isFrontCamera else {
-      print("[ExpoLiveStream] Flash not available on front camera")
-      return
-    }
+    guard !isFrontCamera else { return }
     guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
-          device.hasTorch else {
-      print("[ExpoLiveStream] Torch not available")
-      return
-    }
+          device.hasTorch else { return }
     do {
       try device.lockForConfiguration()
       if isFlashOn {
@@ -368,7 +435,6 @@ class PublisherView: ExpoView {
       }
       device.unlockForConfiguration()
       isFlashOn = !isFlashOn
-      print("[ExpoLiveStream] Flash: \(isFlashOn)")
     } catch {
       print("[ExpoLiveStream] Flash toggle error: \(error)")
     }
@@ -381,12 +447,10 @@ class PublisherView: ExpoView {
         var settings = await mixer.audioMixerSettings
         settings.isMuted = isMuted
         await mixer.setAudioMixerSettings(settings)
-        print("[ExpoLiveStream] Muted: \(isMuted)")
       }
     }
   }
 
-  // MARK: - Bitrate Reporting
   private func startBitrateTimer() {
     bitrateTimer?.invalidate()
     bitrateTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
@@ -394,8 +458,18 @@ class PublisherView: ExpoView {
       Task {
         let info = await stream.info
         let bytesPerSecond = info.currentBytesPerSecond
+        // RTMPConnection is an actor and publishes no disconnect callback, so
+        // the beat that reports bitrate doubles as the drop detector. Android
+        // gets this for free from ConnectChecker.onDisconnect().
+        let isConnected = await self.connection?.connected ?? false
         await MainActor.run {
-          self.onBitrateUpdate(["bitrate": bytesPerSecond * 8])
+          self.emitBitrateUpdate(["bitrate": bytesPerSecond * 8])
+          if self.isStreaming && !isConnected {
+            self.isStreaming = false
+            self.stopBitrateTimer()
+            self.emitDisconnect()
+            self.emitStreamStateChanged(["state": "disconnected"])
+          }
         }
       }
     }
@@ -406,28 +480,50 @@ class PublisherView: ExpoView {
     bitrateTimer = nil
   }
 
-  override func removeFromSuperview() {
-    super.removeFromSuperview()
-    if PublisherView.activeInstance === self {
-      PublisherView.activeInstance = nil
+  /// .playAndRecord is global to the process: leaving it active keeps routing
+  /// every later playback through the publisher's configuration.
+  private func releaseAudioSession() {
+    guard PublisherView.activeInstance == nil else { return }
+    if PlayerView.activeInstance != nil {
+      try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+      return
     }
-    stopBitrateTimer()
-    if isStreaming {
-      stop()
+    do {
+      try AVAudioSession.sharedInstance().setActive(
+        false,
+        options: [.notifyOthersOnDeactivation]
+      )
+    } catch {
+      print("[ExpoLiveStream] Audio session deactivate error: \(error)")
     }
   }
 
-  // MARK: - Cleanup
-  deinit {
+  private func cleanup() {
     NotificationCenter.default.removeObserver(self)
-    bitrateTimer?.invalidate()
-    if isStreaming {
-      let stream = self.stream
-      let connection = self.connection
-      Task {
-        _ = try? await stream?.close()
-        _ = try? await connection?.close()
-      }
+    stopBitrateTimer()
+    PublisherView.unregister(self)
+    releaseAudioSession()
+    isStreaming = false
+    let stream = self.stream
+    let connection = self.connection
+    let mixer = self.mixer
+    self.stream = nil
+    self.connection = nil
+    self.mixer = nil
+    Task {
+      _ = try? await stream?.close()
+      _ = try? await connection?.close()
+      try? await mixer?.attachVideo(nil)
+      try? await mixer?.attachAudio(nil)
     }
+  }
+
+  public override func removeFromSuperview() {
+    super.removeFromSuperview()
+    cleanup()
+  }
+
+  deinit {
+    cleanup()
   }
 }

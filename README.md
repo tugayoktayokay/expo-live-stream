@@ -23,8 +23,8 @@ RTMP live stream **publisher** & **player** for React Native — built as a nati
 - 🎚️ **Quality Presets** — `VideoQuality.HD_720P`, `FHD_1080P`, etc.
 - 🪝 **React Hooks** — `useLiveStream()` and `useLiveStreamPlayer()` for reactive state
 - 📱 **Rotation Support** — Seamless video playback during device orientation changes
-- 🍎 **iOS** — [HaishinKit 2.0](https://github.com/shogo4405/HaishinKit.swift) (publisher) + [VLCKit](https://code.videolan.org/videolan/VLCKit) (player)
-- 🤖 **Android** — [RootEncoder](https://github.com/pedroSG94/RootEncoder) (publisher) + [VLC](https://code.videolan.org/videolan/vlc-android) (player)
+- 🍎 **iOS** — [HaishinKit 2.0](https://github.com/shogo4405/HaishinKit.swift) (publisher & player)
+- 🤖 **Android** — [RootEncoder](https://github.com/pedroSG94/RootEncoder) (publisher) + [Media3/ExoPlayer](https://developer.android.com/media/media3) (player)
 - ⚡ **Expo Modules API** — Native performance, no bridge overhead
 
 ---
@@ -46,6 +46,22 @@ cd ios && pod install
 ### Android
 
 No additional setup needed — native dependencies are bundled.
+
+### Without Expo (bare React Native)
+
+Expo is optional. When the project does not use Expo modules — no
+`useExpoModules` in `android/settings.gradle` and no `use_expo_modules!` in the
+`Podfile` — the package registers itself through React Native autolinking
+instead, and no manual wiring is needed:
+
+- **Android:** autolinking picks up `ExpoLiveStreamPackage` via the bundled
+  `react-native.config.js`.
+- **iOS:** `pod install` compiles the `RCTViewManager` bridge
+  (`ExpoLiveStreamBridge.m`).
+
+Both paths expose the identical JS API, so component and hook code is the same
+either way. When Expo modules *are* present, the Expo module implementation is
+used automatically.
 
 ---
 
@@ -115,6 +131,19 @@ function WatchScreen() {
 | `onBitrateUpdate`      | `(e) => void`  | —           | Bitrate update callback                   |
 
 **Ref methods:** `start()`, `stop()`, `switchCamera()`, `toggleFlash()`, `toggleMute()`
+
+**Stream states** reported by `onStreamStateChanged`:
+
+| State          | Meaning                                                          |
+| -------------- | ---------------------------------------------------------------- |
+| `idle`         | Preview running, not publishing                                  |
+| `connecting`   | RTMP handshake in progress                                       |
+| `streaming`    | Publishing                                                       |
+| `cameraSwitch` | Camera is being swapped; a resolved state follows when it settles |
+| `stopped`      | Publishing stopped on request                                    |
+| `disconnected` | Connection dropped unexpectedly                                  |
+| `failed`       | Connect or encoder setup failed                                  |
+| `auth_error`   | Server rejected the credentials                                  |
 
 ### `<ExpoLiveStreamPlayerView />`
 
@@ -297,7 +326,7 @@ import { LiveStreamWatermark } from 'expo-live-stream';
 
 ## Requirements
 
-- **Expo** SDK 51+
+- **Expo** SDK 51+ (optional — see [Without Expo](#without-expo-bare-react-native))
 - **iOS** 15.1+
 - **Android** API 24+
 - **React Native** 0.73+
@@ -307,9 +336,25 @@ import { LiveStreamWatermark } from 'expo-live-stream';
 | Platform | Library                                                         | Purpose       |
 | -------- | --------------------------------------------------------------- | ------------- |
 | iOS      | [HaishinKit 2.0](https://github.com/shogo4405/HaishinKit.swift) | RTMP publish  |
-| iOS      | [MobileVLCKit](https://code.videolan.org/videolan/VLCKit)       | RTMP playback |
-| Android  | [RootEncoder 2.6.7](https://github.com/pedroSG94/RootEncoder)   | RTMP publish  |
-| Android  | [libVLC 3.6.5](https://code.videolan.org/videolan/vlc-android)  | RTMP playback |
+| iOS      | [HaishinKit 2.0](https://github.com/shogo4405/HaishinKit.swift) | RTMP playback |
+| Android  | [RootEncoder 2.8.1](https://github.com/pedroSG94/RootEncoder)   | RTMP publish  |
+| Android  | [Media3 1.11.1](https://developer.android.com/media/media3)     | RTMP playback |
+
+## Platform Notes
+
+- **Background behaviour (Android):** publishing stops when the view leaves the
+  window and resumes automatically on return, so a backgrounded app does not
+  keep the camera open.
+- **Drop detection:** Android reports an unexpected disconnect through
+  RootEncoder's `ConnectChecker`. HaishinKit exposes no equivalent callback, so
+  iOS polls the RTMP connection state on the same 2s beat that reports bitrate —
+  expect up to ~2s of extra latency before `disconnected` arrives there.
+- **Camera switch:** cameras are swapped in place without dropping the RTMP
+  session, and immediate keyframes are requested on Android so viewers transition
+  without sitting on a frozen GOP; the transition is reported as `cameraSwitch`.
+- **Player reconnect:** the native player retries a lost stream on its own
+  (10 attempts, 3.5s apart) and only then surfaces `onPlayerError`. The
+  `useLiveStreamPlayer` hook's `reconnect` option applies after that.
 
 ## License
 

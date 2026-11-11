@@ -98,6 +98,8 @@ export enum StreamState {
     STOPPED = 'stopped',
     FAILED = 'failed',
     DISCONNECTED = 'disconnected',
+    AUTH_ERROR = 'auth_error',
+    CAMERA_SWITCH = 'cameraSwitch',
 }
 
 // ─── Player State ───────────────────────────────────────────

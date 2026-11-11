@@ -1,10 +1,12 @@
+import Foundation
+import React
+#if canImport(ExpoModulesCore)
 import ExpoModulesCore
 
 public class ExpoLiveStreamModule: Module {
   public func definition() -> ModuleDefinition {
     Name("ExpoLiveStream")
 
-    // ======== Publisher Functions ========
     AsyncFunction("start") { (url: String?) in
       await MainActor.run {
         PublisherView.activeInstance?.start(urlOverride: url)
@@ -35,7 +37,6 @@ public class ExpoLiveStreamModule: Module {
       }
     }
 
-    // ======== Publisher View ========
     View(PublisherView.self) {
       Events(
         "onConnectionSuccess",
@@ -70,8 +71,50 @@ public class ExpoLiveStreamModule: Module {
         view.audioSampleRate = rate
       }
       Prop("frontCamera") { (view: PublisherView, front: Bool) in
-        view.isFrontCamera = front
+        view.frontCamera = front
       }
+    }
+  }
+}
+#endif
+
+@objc(ExpoLiveStreamRNViewManager)
+public class ExpoLiveStreamRNViewManager: RCTViewManager {
+  public override static func requiresMainQueueSetup() -> Bool {
+    return true
+  }
+
+  public override func view() -> UIView! {
+    return PublisherView()
+  }
+
+  @objc public func start(_ url: String?) {
+    DispatchQueue.main.async {
+      PublisherView.activeInstance?.start(urlOverride: url)
+    }
+  }
+
+  @objc public func stop() {
+    DispatchQueue.main.async {
+      PublisherView.activeInstance?.stop()
+    }
+  }
+
+  @objc public func switchCamera() {
+    DispatchQueue.main.async {
+      PublisherView.activeInstance?.switchCamera()
+    }
+  }
+
+  @objc public func toggleFlash() {
+    DispatchQueue.main.async {
+      PublisherView.activeInstance?.toggleFlash()
+    }
+  }
+
+  @objc public func toggleMute() {
+    DispatchQueue.main.async {
+      PublisherView.activeInstance?.toggleMute()
     }
   }
 }

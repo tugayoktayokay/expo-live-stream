@@ -1,12 +1,7 @@
-import {
-  requireNativeViewManager,
-  requireNativeModule,
-} from "expo-modules-core";
 import React, { forwardRef, useImperativeHandle, useRef, useMemo } from "react";
-import { ViewProps } from "react-native";
+import { View, ViewProps } from "react-native";
 import { VideoQuality, QualityPresets, QualityConfig } from "./presets";
-
-// ---- Types ----
+import { resolveNativeModule, resolveNativeView } from "./resolveNativeView";
 
 export type LiveStreamPublisherRef = {
   start: (url?: string) => void;
@@ -23,7 +18,9 @@ export type StreamState =
   | "stopped"
   | "failed"
   | "disconnected"
-  | "auth_error";
+  | "auth_error"
+  /** Camera is being swapped; a resolved state follows when it settles. */
+  | "cameraSwitch";
 
 export type LiveStreamPublisherProps = ViewProps & {
   /** RTMP URL (e.g., rtmp://server/live/stream-key) */
@@ -63,19 +60,40 @@ export type LiveStreamPublisherProps = ViewProps & {
   onBitrateUpdate?: (event: { nativeEvent: { bitrate: number } }) => void;
 };
 
-// ---- Native bindings ----
+const PUBLISHER_VIEW_CONFIG = {
+  uiViewClassName: "ExpoLiveStream",
+  bubblingEventTypes: {},
+  directEventTypes: {
+    topConnectionSuccess: { registrationName: "onConnectionSuccess" },
+    topConnectionFailed: { registrationName: "onConnectionFailed" },
+    topDisconnect: { registrationName: "onDisconnect" },
+    topStreamStateChanged: { registrationName: "onStreamStateChanged" },
+    topBitrateUpdate: { registrationName: "onBitrateUpdate" },
+  },
+  validAttributes: {
+    url: true,
+    streamKey: true,
+    videoWidth: true,
+    videoHeight: true,
+    videoBitrate: true,
+    videoFps: true,
+    audioBitrate: true,
+    audioSampleRate: true,
+    frontCamera: true,
+  },
+};
 
-const NativeView = requireNativeViewManager("ExpoLiveStream");
-const NativeModule = requireNativeModule("ExpoLiveStream");
-
-// ---- Default config ----
+const NativeView = resolveNativeView(PUBLISHER_VIEW_CONFIG);
+const NativeModule = resolveNativeModule<{
+  start: (url?: string | null) => void;
+  stop: () => void;
+  switchCamera: () => void;
+  toggleFlash: () => void;
+  toggleMute: () => void;
+}>("ExpoLiveStream");
 
 const DEFAULT_CONFIG: QualityConfig = QualityPresets[VideoQuality.HD_720P];
-
-// ---- No-op handler (Fabric requires all events to be registered) ----
 const noop = () => {};
-
-// ---- Component ----
 
 const ExpoLiveStreamPublisherView = forwardRef<
   LiveStreamPublisherRef,
@@ -101,7 +119,6 @@ const ExpoLiveStreamPublisherView = forwardRef<
   ) => {
     const nativeRef = useRef<any>(null);
 
-    // Resolve quality: preset → individual overrides → defaults
     const resolvedConfig = useMemo(() => {
       const preset = quality ? QualityPresets[quality] : DEFAULT_CONFIG;
       return {
@@ -124,21 +141,25 @@ const ExpoLiveStreamPublisherView = forwardRef<
 
     useImperativeHandle(ref, () => ({
       start: (url?: string) => {
-        NativeModule.start(url ?? null);
+        NativeModule?.start?.(url ?? null);
       },
       stop: () => {
-        NativeModule.stop();
+        NativeModule?.stop?.();
       },
       switchCamera: () => {
-        NativeModule.switchCamera();
+        NativeModule?.switchCamera?.();
       },
       toggleFlash: () => {
-        NativeModule.toggleFlash();
+        NativeModule?.toggleFlash?.();
       },
       toggleMute: () => {
-        NativeModule.toggleMute();
+        NativeModule?.toggleMute?.();
       },
     }));
+
+    if (!NativeView) {
+      return <View {...props} ref={nativeRef} />;
+    }
 
     return (
       <NativeView
