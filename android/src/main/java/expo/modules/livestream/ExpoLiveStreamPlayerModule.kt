@@ -49,6 +49,11 @@ class ExpoLiveStreamPlayerViewManager : SimpleViewManager<PlayerView>() {
     view.streamName = name ?: ""
   }
 
+  @ReactProp(name = "resizeMode")
+  fun setResizeMode(view: PlayerView, mode: String?) {
+    view.resizeMode = mode ?: "contain"
+  }
+
   override fun getExportedCustomDirectEventTypeConstants(): MutableMap<String, Any> {
     val map = super.getExportedCustomDirectEventTypeConstants() ?: mutableMapOf()
     val events = listOf(

@@ -6,9 +6,12 @@ import android.graphics.SurfaceTexture
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.Surface
 import android.view.TextureView
 import android.view.ViewGroup
 import android.widget.LinearLayout
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -16,7 +19,11 @@ import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.rtmp.RtmpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.audio.AudioSink
+import androidx.media3.exoplayer.audio.DefaultAudioSink
+import androidx.media3.exoplayer.audio.DefaultAudioTrackBufferSizeProvider
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -40,24 +47,50 @@ class PlayerView(context: Context) : LinearLayout(context) {
      * exactly what a live viewer must not see, so playback is nudged back to
      * the buffered edge once it drifts past this.
      */
-    private const val MAX_LIVE_DRIFT_MS = 2500L
-    private const val TARGET_LIVE_DRIFT_MS = 600L
-    private const val EXTREME_LIVE_DRIFT_MS = 15000L
+    private const val MAX_LIVE_DRIFT_MS = 10000L
+    private const val TARGET_LIVE_DRIFT_MS = 4000L
+    private const val EXTREME_LIVE_DRIFT_MS = 20000L
+    /** Delay before surfacing transient buffering state to JS UI. */
+    private const val BUFFERING_REPORT_DELAY_MS = 800L
     /** How often the watchdog looks at drift and at the frame clock. */
     private const val TICK_MS = 1000L
 
     /** No rendered frame for this long while playing counts as a stall. */
     private const val STALL_TIMEOUT_MS = 8000L
+
+    /**
+     * Connecting or buffering this long without a frame and without a player
+     * error (an RTMP socket that is open but silent) counts as a stall too;
+     * otherwise the view waits on a spinner forever.
+     */
+    private const val NO_FRAME_TIMEOUT_MS = 15000L
+
+    /**
+     * Reconnect delays grow from 3.5 s to 15 s, so ten attempts ride out about
+     * two minutes of a bad network or a restarting encoder instead of giving up
+     * after 35 s, without hammering the server while it is down.
+     */
+    private const val RECONNECT_BASE_DELAY_MS = 3500L
+    private const val RECONNECT_MAX_DELAY_MS = 15000L
   }
 
   private var player: ExoPlayer? = null
   private var textureView: TextureView? = null
+  private var videoSurface: Surface? = null
   private var surfaceReady = false
   private var videoWidth = 0
   private var videoHeight = 0
   private var isSpeedAdjusted = false
   var url: String = ""
   var streamName: String = ""
+  var resizeMode: String = "contain"
+    set(value) {
+      val normalized = if (value == "cover") "cover" else "contain"
+      if (field != normalized) {
+        field = normalized
+        post { updateTextureViewTransform() }
+      }
+    }
 
   private fun onPlayerStateChanged(data: Map<String, Any?>) =
     emitViewEvent(this, "onPlayerStateChanged", data)
@@ -73,6 +106,8 @@ class PlayerView(context: Context) : LinearLayout(context) {
   private val maxReconnectAttempts = 10
   private var reconnectHandler: Handler? = null
   private var reconnectRunnable: Runnable? = null
+  private var bufferingHandler: Handler? = null
+  private var bufferingRunnable: Runnable? = null
 
   @Volatile private var lastFrameTime = 0L
   private var stallCheckHandler: Handler? = null
@@ -94,8 +129,21 @@ class PlayerView(context: Context) : LinearLayout(context) {
    * SurfaceView, which punches through the view hierarchy and misbehaves when
    * React Native reparents or animates the view.
    */
+  private fun ensureVideoSurface(): Surface? {
+    videoSurface?.let {
+      if (it.isValid) return it
+      try { it.release() } catch (_: Exception) {}
+      videoSurface = null
+    }
+    val st = textureView?.surfaceTexture ?: return null
+    return Surface(st).also { videoSurface = it }
+  }
+
   private fun setupView() {
     textureView = TextureView(context).apply {
+      // Until the stream's size is known a TextureView stretches the frame over
+      // the whole view, so it stays hidden until the first correct transform.
+      alpha = 0f
       layoutParams = LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT,
         ViewGroup.LayoutParams.MATCH_PARENT
@@ -103,7 +151,7 @@ class PlayerView(context: Context) : LinearLayout(context) {
       surfaceTextureListener = object : TextureView.SurfaceTextureListener {
         override fun onSurfaceTextureAvailable(st: SurfaceTexture, width: Int, height: Int) {
           surfaceReady = true
-          player?.setVideoTextureView(this@apply)
+          ensureVideoSurface()?.let { player?.setVideoSurface(it) }
           if (pendingPlay) {
             pendingPlay = false
             doPlay()
@@ -116,7 +164,9 @@ class PlayerView(context: Context) : LinearLayout(context) {
 
         override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
           surfaceReady = false
-          player?.setVideoTextureView(null)
+          player?.setVideoSurface(null)
+          try { videoSurface?.release() } catch (_: Exception) {}
+          videoSurface = null
           return true
         }
 
@@ -135,7 +185,16 @@ class PlayerView(context: Context) : LinearLayout(context) {
     val w = r - l
     val h = b - t
     if (w > 0 && h > 0) {
-      textureView?.layout(0, 0, w, h)
+      val tv = textureView
+      if (tv != null && (tv.width != w || tv.height != h)) {
+        // RN lays children out itself and skips measure, so the TextureView
+        // is measured here too; otherwise its buffer keeps the old size.
+        tv.measure(
+          MeasureSpec.makeMeasureSpec(w, MeasureSpec.EXACTLY),
+          MeasureSpec.makeMeasureSpec(h, MeasureSpec.EXACTLY)
+        )
+        tv.layout(0, 0, w, h)
+      }
       updateTextureViewTransform()
     }
   }
@@ -150,16 +209,27 @@ class PlayerView(context: Context) : LinearLayout(context) {
     val videoRatio = videoWidth.toFloat() / videoHeight.toFloat()
     val scaleX: Float
     val scaleY: Float
-    if (videoRatio > viewRatio) {
-      scaleX = videoRatio / viewRatio
-      scaleY = 1f
+    if (resizeMode == "cover") {
+      if (videoRatio > viewRatio) {
+        scaleX = videoRatio / viewRatio
+        scaleY = 1f
+      } else {
+        scaleX = 1f
+        scaleY = viewRatio / videoRatio
+      }
     } else {
-      scaleX = 1f
-      scaleY = viewRatio / videoRatio
+      if (videoRatio > viewRatio) {
+        scaleX = 1f
+        scaleY = viewRatio / videoRatio
+      } else {
+        scaleX = videoRatio / viewRatio
+        scaleY = 1f
+      }
     }
     val matrix = Matrix()
     matrix.setScale(scaleX, scaleY, viewWidth / 2f, viewHeight / 2f)
     tv.setTransform(matrix)
+    if (tv.alpha != 1f) tv.alpha = 1f
   }
 
   private fun buildConnectUrl(): String {
@@ -187,25 +257,53 @@ class PlayerView(context: Context) : LinearLayout(context) {
     // over the byte thresholds so a high-bitrate stream does not re-introduce
     // the same back-pressure through the size cap.
     val loadControl = DefaultLoadControl.Builder()
-      .setBufferDurationsMs(1_000, 60_000, 500, 1_000)
+      .setBufferDurationsMs(4_000, 30_000, 1_200, 2_500)
+      .setTargetBufferBytes(32 * 1024 * 1024)
       .setPrioritizeTimeOverSizeThresholds(true)
       .setBackBuffer(0, false)
       .build()
 
-    val exo = ExoPlayer.Builder(context)
-      .setLoadControl(loadControl)
+    // Media3 1.8+ surfaces AudioTrack PCM underruns immediately as STATE_BUFFERING.
+    // A 2s target PCM buffer prevents micro-stutters and false rebuffer loops on live RTMP.
+    val audioBufferSizeProvider = DefaultAudioTrackBufferSizeProvider.Builder()
+      .setTargetPcmBufferDurationUs(2_000_000)
       .build()
+
+    val renderersFactory = object : DefaultRenderersFactory(context) {
+      override fun buildAudioSink(
+        context: Context,
+        enableFloatOutput: Boolean,
+        enableAudioTrackPlaybackParams: Boolean
+      ): AudioSink {
+        return DefaultAudioSink.Builder(context)
+          .setEnableFloatOutput(enableFloatOutput)
+          .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
+          .setAudioTrackBufferSizeProvider(audioBufferSizeProvider)
+          .build()
+      }
+    }.setEnableDecoderFallback(true)
+
+    val audioAttributes = AudioAttributes.Builder()
+      .setUsage(C.USAGE_MEDIA)
+      .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+      .build()
+
+    val exo = ExoPlayer.Builder(context, renderersFactory)
+      .setLoadControl(loadControl)
+      .setAudioAttributes(audioAttributes, true)
+      .build()
+    exo.volume = 1.0f
 
     exo.addListener(object : Player.Listener {
       override fun onPlaybackStateChanged(playbackState: Int) {
         when (playbackState) {
           Player.STATE_BUFFERING -> post {
-            if (lastReportedState != "buffering" && lastReportedState != "connecting") {
-              lastReportedState = "buffering"
-              onPlayerStateChanged(mapOf("state" to "buffering"))
-            }
+            scheduleBufferingReport()
           }
-          Player.STATE_READY -> post { reportPlaying() }
+          Player.STATE_READY -> post {
+            cancelBufferingReport()
+            reportPlaying()
+          }
           Player.STATE_ENDED -> post {
             if (isPlaying) startReconnectPoller()
           }
@@ -214,19 +312,22 @@ class PlayerView(context: Context) : LinearLayout(context) {
       }
 
       override fun onVideoSizeChanged(videoSize: VideoSize) {
-        if (videoSize.width > 0 && videoSize.height > 0) {
-          videoWidth = videoSize.width
+        // ExoPlayer calls back on the main looper, so the transform is applied
+        // synchronously, before the first frame of the new size is drawn.
+        val width = (videoSize.width * videoSize.pixelWidthHeightRatio).toInt()
+        if (width > 0 && videoSize.height > 0 &&
+          (width != videoWidth || videoSize.height != videoHeight)
+        ) {
+          videoWidth = width
           videoHeight = videoSize.height
-          post { updateTextureViewTransform() }
+          updateTextureViewTransform()
         }
       }
 
       override fun onRenderedFirstFrame() {
         lastFrameTime = System.currentTimeMillis()
-        post {
-          updateTextureViewTransform()
-          reportPlaying()
-        }
+        updateTextureViewTransform()
+        post { reportPlaying() }
       }
 
       override fun onPlayerError(error: PlaybackException) {
@@ -239,6 +340,7 @@ class PlayerView(context: Context) : LinearLayout(context) {
             // playable by reconnecting; retrying it on a timer only produces a
             // stutter loop, so these fail immediately instead.
             isPlaying = false
+            keepScreenOn = false
             stopStallChecker()
             stopReconnectPoller()
             lastReportedState = "failed"
@@ -249,7 +351,12 @@ class PlayerView(context: Context) : LinearLayout(context) {
       }
     })
 
-    textureView?.let { if (surfaceReady) exo.setVideoTextureView(it) }
+    exo.setVideoFrameMetadataListener { _, _, _, _ ->
+      lastFrameTime = System.currentTimeMillis()
+    }
+    if (surfaceReady) {
+      ensureVideoSurface()?.let { exo.setVideoSurface(it) }
+    }
     player = exo
     return exo
   }
@@ -266,7 +373,30 @@ class PlayerView(context: Context) : LinearLayout(context) {
     else -> false
   }
 
+  private fun scheduleBufferingReport() {
+    if (lastReportedState == "buffering" || lastReportedState == "connecting") return
+    if (bufferingRunnable != null) return
+    val handler = bufferingHandler ?: Handler(Looper.getMainLooper()).also { bufferingHandler = it }
+    val runnable = Runnable {
+      bufferingRunnable = null
+      if (isPlaying && player?.playbackState == Player.STATE_BUFFERING &&
+        lastReportedState != "buffering" && lastReportedState != "connecting"
+      ) {
+        lastReportedState = "buffering"
+        onPlayerStateChanged(mapOf("state" to "buffering"))
+      }
+    }
+    bufferingRunnable = runnable
+    handler.postDelayed(runnable, BUFFERING_REPORT_DELAY_MS)
+  }
+
+  private fun cancelBufferingReport() {
+    bufferingRunnable?.let { bufferingHandler?.removeCallbacks(it) }
+    bufferingRunnable = null
+  }
+
   private fun reportPlaying() {
+    cancelBufferingReport()
     if (!isPlaying || lastReportedState == "playing") return
     lastReportedState = "playing"
     onPlayerStateChanged(mapOf("state" to "playing"))
@@ -318,7 +448,9 @@ class PlayerView(context: Context) : LinearLayout(context) {
     try {
       prepareAndPlay(ensurePlayer(), connectUrl)
       isPlaying = true
+      keepScreenOn = true
       startStallChecker()
+      lastFrameTime = System.currentTimeMillis()
     } catch (e: Exception) {
       Log.e(TAG, "play failed", e)
       onPlayerError(mapOf("msg" to (e.message ?: "Unknown error")))
@@ -331,6 +463,7 @@ class PlayerView(context: Context) : LinearLayout(context) {
       if (!isPlaying && player == null && !pendingPlay) return@post
       pendingPlay = false
       isPlaying = false
+      keepScreenOn = false
       lastPlayRequestAt = 0L
       stopStallChecker()
       stopReconnectPoller()
@@ -352,6 +485,7 @@ class PlayerView(context: Context) : LinearLayout(context) {
       // Stop the watchdogs: they look at isPlaying/lastReportedState and would
       // treat the absence of frames as a stall and silently restart playback.
       isPlaying = false
+      keepScreenOn = false
       stopStallChecker()
       stopReconnectPoller()
       lastReportedState = "paused"
@@ -370,9 +504,11 @@ class PlayerView(context: Context) : LinearLayout(context) {
         exo.stop()
         prepareAndPlay(exo, connectUrl)
         isPlaying = true
+        keepScreenOn = true
         lastReportedState = "connecting"
         onPlayerStateChanged(mapOf("state" to "connecting"))
         startStallChecker()
+        lastFrameTime = System.currentTimeMillis()
       } catch (e: Exception) {
         Log.e(TAG, "resume failed", e)
       }
@@ -393,6 +529,12 @@ class PlayerView(context: Context) : LinearLayout(context) {
           } else {
             trimLiveDrift()
           }
+        } else if (isPlaying && reconnectHandler == null && lastFrameTime > 0L &&
+          (lastReportedState == "connecting" || lastReportedState == "buffering") &&
+          System.currentTimeMillis() - lastFrameTime > NO_FRAME_TIMEOUT_MS
+        ) {
+          lastFrameTime = 0L
+          startReconnectPoller()
         }
         stallCheckHandler?.postDelayed(this, TICK_MS)
       }
@@ -402,6 +544,7 @@ class PlayerView(context: Context) : LinearLayout(context) {
 
   private fun trimLiveDrift() {
     val exo = player ?: return
+    if (exo.playbackState != Player.STATE_READY) return
     val buffered = exo.bufferedPosition
     val current = exo.currentPosition
     if (buffered <= 0L || current < 0L) return
@@ -424,9 +567,9 @@ class PlayerView(context: Context) : LinearLayout(context) {
         Log.e(TAG, "live edge re-prepare failed", e)
       }
     } else if (drift > MAX_LIVE_DRIFT_MS && !isSpeedAdjusted) {
-      Log.d(TAG, "live drift ${drift}ms, nudging playback speed to 1.06x")
+      Log.d(TAG, "live drift ${drift}ms, nudging playback speed to 1.03x")
       isSpeedAdjusted = true
-      exo.setPlaybackSpeed(1.06f)
+      exo.setPlaybackSpeed(1.03f)
     } else if (drift <= TARGET_LIVE_DRIFT_MS && isSpeedAdjusted) {
       isSpeedAdjusted = false
       exo.setPlaybackSpeed(1.0f)
@@ -434,6 +577,7 @@ class PlayerView(context: Context) : LinearLayout(context) {
   }
 
   private fun stopStallChecker() {
+    cancelBufferingReport()
     stallCheckRunnable?.let { stallCheckHandler?.removeCallbacks(it) }
     stallCheckHandler = null
     stallCheckRunnable = null
@@ -457,6 +601,7 @@ class PlayerView(context: Context) : LinearLayout(context) {
           stopReconnectPoller()
           stopStallChecker()
           isPlaying = false
+          keepScreenOn = false
           lastReportedState = "failed"
           onPlayerError(mapOf("msg" to "Stream lost — reconnect failed"))
           onPlayerStateChanged(mapOf("state" to "failed"))
@@ -464,15 +609,25 @@ class PlayerView(context: Context) : LinearLayout(context) {
         }
         try {
           val exo = ensurePlayer()
+          if (isSpeedAdjusted) {
+            isSpeedAdjusted = false
+            exo.setPlaybackSpeed(1.0f)
+          }
           exo.stop()
           prepareAndPlay(exo, buildConnectUrl())
         } catch (e: Exception) {
           Log.e(TAG, "reconnect failed", e)
         }
-        reconnectHandler?.postDelayed(this, 3500L)
+        reconnectHandler?.postDelayed(this, reconnectDelayMs(reconnectAttempts))
       }
     }
-    reconnectHandler?.postDelayed(reconnectRunnable!!, 3500L)
+    reconnectHandler?.postDelayed(reconnectRunnable!!, reconnectDelayMs(0))
+  }
+
+  private fun reconnectDelayMs(attempt: Int): Long {
+    var delay = RECONNECT_BASE_DELAY_MS.toDouble()
+    repeat(attempt) { delay *= 1.5 }
+    return delay.toLong().coerceAtMost(RECONNECT_MAX_DELAY_MS)
   }
 
   private fun stopReconnectPoller() {
@@ -487,11 +642,14 @@ class PlayerView(context: Context) : LinearLayout(context) {
     stopReconnectPoller()
     pendingPlay = false
     isPlaying = false
+    keepScreenOn = false
     // Each step is guarded on its own: one throwing call must not leave the
     // player or its surface behind.
     val exo = player
     player = null
-    try { exo?.setVideoTextureView(null) } catch (e: Exception) { Log.w(TAG, "detach surface failed", e) }
+    try { exo?.setVideoSurface(null) } catch (e: Exception) { Log.w(TAG, "detach surface failed", e) }
+    try { videoSurface?.release() } catch (_: Exception) {}
+    videoSurface = null
     try { exo?.stop() } catch (e: Exception) { Log.w(TAG, "player stop failed", e) }
     try { exo?.release() } catch (e: Exception) { Log.w(TAG, "player release failed", e) }
     surfaceReady = textureView?.isAvailable == true

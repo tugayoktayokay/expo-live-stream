@@ -28,6 +28,8 @@ export type LiveStreamPlayerProps = ViewProps & {
   url?: string;
   /** Stream name to subscribe to (optional, can be part of URL) */
   streamName?: string;
+  /** Video scaling mode on Android ('contain' fits full frame, 'cover' fills and crops) */
+  resizeMode?: "contain" | "cover";
   /** Automatically start playback when component mounts (default: false) */
   autoPlay?: boolean;
   /** Called when player state changes */
@@ -48,6 +50,7 @@ const PLAYER_VIEW_CONFIG = {
   validAttributes: {
     url: true,
     streamName: true,
+    resizeMode: true,
   },
 };
 

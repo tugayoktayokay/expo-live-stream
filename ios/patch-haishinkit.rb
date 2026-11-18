@@ -12,6 +12,14 @@ def patch_haishinkit_sources!(pods_root)
       'Task { await stream.dispatch(message, type: type) }',
       'await stream.dispatch(message, type: type)'
     )
+    # Preserve the initial chunk header type (e.g. Type 0 absolute timestamp)
+    # when a multi-chunk message (such as a video keyframe) finishes on a
+    # Type 3 continuation chunk; otherwise RTMPTimestamp adds the absolute
+    # timestamp as a delta and corrupts A/V sync.
+    patched = patched.sub(
+      'await dispatch(message, type: chunkType)',
+      'await dispatch(message, type: messageHeader.initialChunkType)'
+    )
     if patched != src
       File.chmod(0644, conn_path)
       File.write(conn_path, patched)
@@ -72,10 +80,30 @@ def patch_haishinkit_sources!(pods_root)
   if File.exist?(chunk_path)
     src = File.read(chunk_path)
     patched = src
-    patched = patched.sub(
-      "    var timestamp: UInt32 = 0\n    var messageLength: Int = 0 {",
-      "    var timestamp: UInt32 = 0\n    var hasExtendedTimestamp = false\n    var messageLength: Int = 0 {"
-    )
+    unless patched.include?('var hasExtendedTimestamp')
+      patched = patched.sub(
+        "    var timestamp: UInt32 = 0\n    var messageLength: Int = 0 {",
+        "    var timestamp: UInt32 = 0\n    var hasExtendedTimestamp = false\n    var messageLength: Int = 0 {"
+      )
+    end
+    unless patched.include?('var initialChunkType')
+      patched = patched.sub(
+        "    var timestamp: UInt32 = 0\n",
+        "    var timestamp: UInt32 = 0\n    var initialChunkType: RTMPChunkType = .zero\n"
+      )
+    end
+    unless patched.include?('fileprivate var position = 0')
+      patched = patched.sub(
+        '    private var position = 0',
+        '    fileprivate var position = 0'
+      )
+    end
+    unless patched.include?('messageHeader.initialChunkType = type')
+      patched = patched.sub(
+        "        if remaining < type.headerSize {\n            throw RTMPChunkError.bufferUnderflow\n        }\n        switch type {",
+        "        if remaining < type.headerSize {\n            throw RTMPChunkError.bufferUnderflow\n        }\n        if messageHeader.position == 0 {\n            messageHeader.initialChunkType = type\n        }\n        switch type {"
+      )
+    end
     patched = patched.sub(
       "    func getBasicHeader() throws -> (RTMPChunkType, UInt16) {\n        let rawValue = (data[position] & 0b11000000) >> 6",
       "    func getBasicHeader() throws -> (RTMPChunkType, UInt16) {\n        if remaining < 1 {\n            throw RTMPChunkError.bufferUnderflow\n        }\n        let rawValue = (data[position] & 0b11000000) >> 6"
@@ -95,6 +123,25 @@ def patch_haishinkit_sources!(pods_root)
     if patched != src
       File.chmod(0644, chunk_path)
       File.write(chunk_path, patched)
+    end
+  end
+
+  media_link_path = File.join(pods_root.to_s, 'HaishinKit/HaishinKit/Sources/HKStream/MediaLink.swift')
+  if File.exist?(media_link_path)
+    src = File.read(media_link_path)
+    patched = src
+    # Bypass MediaLink's free-running display-link duration counter when no
+    # HaishinKit AudioPlayerNode is attached so PlayerView can synchronize
+    # video frames directly against the hardware AVAudioPlayerNode clock.
+    unless patched.include?('if audioPlayer == nil')
+      patched = patched.sub(
+        "    func enqueue(_ sampleBuffer: CMSampleBuffer) {\n        guard isRunning else {\n            return\n        }",
+        "    func enqueue(_ sampleBuffer: CMSampleBuffer) {\n        guard isRunning else {\n            return\n        }\n        if audioPlayer == nil {\n            continutation?.yield(sampleBuffer)\n            return\n        }"
+      )
+    end
+    if patched != src
+      File.chmod(0644, media_link_path)
+      File.write(media_link_path, patched)
     end
   end
 end

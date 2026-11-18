@@ -1,5 +1,7 @@
 import AVFoundation
+import CoreMedia
 import HaishinKit
+import QuartzCore
 import React
 import UIKit
 #if canImport(ExpoModulesCore)
@@ -14,142 +16,280 @@ private final class WeakPlayerBox {
   init(_ value: PlayerView) { self.value = value }
 }
 
-/// Plays the decoded audio of an incoming stream.
-///
-/// HaishinKit ships `AudioPlayer` for exactly this, and it is not usable as of
-/// 2.0.9: `AudioPlayerNode.enqueue` advances a running sample counter and reads
-/// the resulting absolute `AVAudioTime` *inside an unstructured `Task`*, one
-/// task per buffer. Those tasks are not ordered against each other, so buffers
-/// reach `scheduleBuffer(_:at:)` carrying one another's timestamps and play
-/// back out of order - the metallic, robotic voice. `MediaLink` then paces
-/// video off that same clock (`audioPlayer?.currentTime`), which is why the
-/// picture stutters along with the sound.
-///
-/// Handing the buffers over back to back with no explicit time avoids all of
-/// it: `AVAudioPlayerNode` plays a queue in the order it was given, and a
-/// single serial queue is what makes that order well defined. Video then paces
-/// off `MediaLink`'s own display-link clock instead, which runs at real time.
-
+/// Plays decoded PCM buffers on a serial queue and exposes the exact RTMP
+/// presentation timestamp (PTS) currently leaving the speaker so `VideoSyncPacer`
+/// can lock video presentation to the hardware audio clock.
 private final class AudioRenderer: @unchecked Sendable {
-  /// Buffers to hold before playback starts, and again after a starve.
-  ///
-  /// HaishinKit decodes AAC in frames of 1024 samples - about 23 ms each - so
-  /// this is roughly 280 ms of slack. The first version of this used four
-  /// buffers (~90 ms), which is less than ordinary Wi-Fi jitter: the node ran
-  /// dry several times a second, and every starve cost a pause/resume. That
-  /// chopping is itself what a listener calls robotic, so the cushion has to be
-  /// comfortably larger than the jitter it is there to absorb.
-  private static let primeBufferCount = 12
+  private struct PendingChunk {
+    let pcm: AVAudioPCMBuffer
+    let pts: Double?
+  }
 
-  /// Queued audio above this is latency nobody asked for - it means the sender
-  /// has been outrunning the receiver's clock. Far enough above the cushion
-  /// that jitter alone never reaches it.
-  private static let maxQueuedBuffers = 64
+  private struct ScheduledSegment {
+    let startNodeSec: Double
+    let endNodeSec: Double
+    let startPTS: Double
+  }
+
+  /// Initial cushion (~128 ms at 48 kHz) before starting playback.
+  private static let primeBufferCount = 6
+  /// Smaller cushion (~85 ms) after a transient network starve.
+  private static let reprimeBufferCount = 4
+  /// Buffers kept inside `AVAudioPlayerNode` at any time so CoreAudio never
+  /// underruns while keeping excess buffers trimmable in `pending` without
+  /// calling `node.stop()` (which would click).
+  private static let maxInFlightBuffers = 6
+  /// Maximum jitter queue (~300 ms) before dropping stale buffers to stay on
+  /// the live edge (total ceiling: ~425 ms).
+  private static let maxPendingBuffers = 14
 
   private let queue = DispatchQueue(label: "expo.livestream.player.audio")
+  private let audioGraphLock = NSLock()
+  private let clockLock = NSLock()
+
   private let engine = AVAudioEngine()
   private let node = AVAudioPlayerNode()
   private var currentFormat: AVAudioFormat?
-  private var scheduled = 0
+  private var pending: [PendingChunk] = []
+  private var inFlight = 0
+  private var hasPrimedOnce = false
+  private var totalScheduledDurationSec: Double = 0
+  private var lastKnownEndPTS: Double = 0
   private var generation: UInt64 = 0
   private var didReportFailure = false
 
-  // Counters for the periodic diagnostic below.
+  // Shared clock state read non-blockingly by the main-thread display link.
+  private var _segments: [ScheduledSegment] = []
+  private var _isNodePlaying = false
+  private var _cachedOutputLatency: Double = 0.015
+
+  // Diagnostic counters.
   private var statsEnqueued = 0
   private var statsStarves = 0
-  private var statsResets = 0
+  private var statsDrops = 0
   private var statsLoggedAt: TimeInterval = 0
 
   init() {
     engine.attach(node)
   }
 
-  func enqueue(_ buffer: AVAudioBuffer) {
+  func enqueue(_ buffer: AVAudioBuffer, when: AVAudioTime) {
     guard let pcm = buffer as? AVAudioPCMBuffer, pcm.frameLength > 0 else { return }
-    queue.async { [weak self] in self?.render(pcm) }
+    let pts: Double? = when.isHostTimeValid
+      ? AVAudioTime.seconds(forHostTime: when.hostTime)
+      : nil
+    queue.async { [weak self] in self?.render(pcm, pts: pts) }
+  }
+
+  /// Returns the stream PTS (in seconds) currently audible at the hardware
+  /// output, or `nil` when audio is not actively rendering.
+  func currentPlaybackPTS() -> Double? {
+    clockLock.lock()
+    let playing = _isNodePlaying
+    let segments = _segments
+    let outputLatency = _cachedOutputLatency
+    clockLock.unlock()
+
+    guard playing, !segments.isEmpty else { return nil }
+    guard audioGraphLock.try() else { return nil }
+    guard engine.isRunning,
+          node.isPlaying,
+          let nodeTime = node.lastRenderTime,
+          nodeTime.isSampleTimeValid,
+          let playerTime = node.playerTime(forNodeTime: nodeTime),
+          playerTime.sampleRate > 0 else {
+      audioGraphLock.unlock()
+      return nil
+    }
+    audioGraphLock.unlock()
+
+    let hostNow = mach_absolute_time()
+    let elapsedSinceRender: Double
+    if nodeTime.isHostTimeValid, hostNow > nodeTime.hostTime {
+      elapsedSinceRender = min(AVAudioTime.seconds(forHostTime: hostNow - nodeTime.hostTime), 0.05)
+    } else {
+      elapsedSinceRender = 0
+    }
+
+    let rawPlayedSec = Double(max(0, playerTime.sampleTime)) / playerTime.sampleRate
+    let effectivePlayedSec = max(0, rawPlayedSec + elapsedSinceRender - outputLatency)
+
+    for seg in segments where effectivePlayedSec >= seg.startNodeSec && effectivePlayedSec <= seg.endNodeSec {
+      return seg.startPTS + (effectivePlayedSec - seg.startNodeSec)
+    }
+    if let first = segments.first, effectivePlayedSec < first.startNodeSec {
+      return first.startPTS - (first.startNodeSec - effectivePlayedSec)
+    }
+    if let last = segments.last {
+      let extra = min(effectivePlayedSec - last.endNodeSec, 0.10)
+      return last.startPTS + (last.endNodeSec - last.startNodeSec) + max(0, extra)
+    }
+    return nil
   }
 
   func stop() {
     queue.async { [weak self] in
       guard let self = self else { return }
-      self.reset()
+      self.audioGraphLock.lock()
+      self.resetLocked()
       if self.engine.isRunning { self.engine.stop() }
+      self.audioGraphLock.unlock()
       self.currentFormat = nil
       self.didReportFailure = false
       self.statsEnqueued = 0
       self.statsStarves = 0
-      self.statsResets = 0
+      self.statsDrops = 0
       self.statsLoggedAt = 0
     }
   }
 
-  private func reset() {
+  private func resetLocked() {
     generation &+= 1
     if node.isPlaying { node.stop() }
     node.reset()
-    scheduled = 0
+    pending.removeAll(keepingCapacity: true)
+    inFlight = 0
+    hasPrimedOnce = false
+    totalScheduledDurationSec = 0
+    lastKnownEndPTS = 0
+    clockLock.lock()
+    _segments.removeAll(keepingCapacity: true)
+    _isNodePlaying = false
+    clockLock.unlock()
   }
 
-  private func render(_ pcm: AVAudioPCMBuffer) {
-    if currentFormat != pcm.format, !rewire(to: pcm.format) { return }
+  private func render(_ pcm: AVAudioPCMBuffer, pts: Double?) {
+    if currentFormat != pcm.format || !engine.isRunning {
+      if !rewire(to: pcm.format) { return }
+    }
     guard engine.isRunning else { return }
 
-    // Latency that has run away cannot be trimmed out of the node's queue -
-    // AVAudioPlayerNode has no way to drop what is already scheduled - so the
-    // queue is emptied and re-primed. One audible seam beats a viewer who is
-    // permanently a second behind.
-    if scheduled >= Self.maxQueuedBuffers {
-      statsResets += 1
-      reset()
+    statsEnqueued += 1
+    pending.append(PendingChunk(pcm: pcm, pts: pts))
+
+    if pending.count > Self.maxPendingBuffers {
+      let overflow = pending.count - Self.maxPendingBuffers
+      pending.removeFirst(overflow)
+      statsDrops += overflow
     }
 
-    let currentGen = generation
-    scheduled += 1
-    statsEnqueued += 1
-    node.scheduleBuffer(pcm) { [weak self] in
-      guard let self = self else { return }
-      self.queue.async {
-        guard self.generation == currentGen else { return }
-        self.scheduled = max(0, self.scheduled - 1)
-        // Out of audio: stop rather than let the node render on into silence,
-        // so the next burst rebuilds a full cushion before playing again.
-        if self.scheduled == 0, self.node.isPlaying {
-          self.statsStarves += 1
-          self.node.pause()
+    if node.isPlaying {
+      drainPendingToNode()
+    } else {
+      let needed = hasPrimedOnce ? Self.reprimeBufferCount : Self.primeBufferCount
+      if inFlight + pending.count >= needed {
+        drainPendingToNode()
+        audioGraphLock.lock()
+        if engine.isRunning && !node.isPlaying {
+          node.play()
+        }
+        let started = node.isPlaying
+        audioGraphLock.unlock()
+        if started {
+          hasPrimedOnce = true
+          clockLock.lock()
+          _isNodePlaying = true
+          clockLock.unlock()
         }
       }
     }
-    if !node.isPlaying, scheduled >= Self.primeBufferCount { node.play() }
 
     logStatsIfDue()
   }
 
-  /// Debug-only heartbeat. A healthy live stream shows `queued` hovering near
-  /// the cushion with `starves` flat; starves climbing means the cushion is too
-  /// small for this network, and resets climbing means the sender's clock is
-  /// running ahead of ours.
+  private func drainPendingToNode() {
+    while inFlight < Self.maxInFlightBuffers, !pending.isEmpty {
+      let chunk = pending.removeFirst()
+      let sampleRate = chunk.pcm.format.sampleRate
+      guard sampleRate > 0 else { continue }
+      let durationSec = Double(chunk.pcm.frameLength) / sampleRate
+      let segStartSec = totalScheduledDurationSec
+      let segEndSec = segStartSec + durationSec
+      totalScheduledDurationSec = segEndSec
+
+      let resolvedPTS: Double
+      if let p = chunk.pts, p.isFinite {
+        resolvedPTS = p
+        lastKnownEndPTS = p + durationSec
+      } else {
+        resolvedPTS = lastKnownEndPTS
+        lastKnownEndPTS += durationSec
+      }
+
+      clockLock.lock()
+      _segments.append(ScheduledSegment(
+        startNodeSec: segStartSec,
+        endNodeSec: segEndSec,
+        startPTS: resolvedPTS
+      ))
+      if _segments.count > 32 {
+        _segments.removeFirst(_segments.count - 32)
+      }
+      clockLock.unlock()
+
+      let gen = generation
+      inFlight += 1
+      node.scheduleBuffer(chunk.pcm) { [weak self] in
+        self?.queue.async {
+          guard let self = self, self.generation == gen else { return }
+          self.inFlight = max(0, self.inFlight - 1)
+          self.drainPendingToNode()
+          if self.inFlight == 0, self.pending.isEmpty {
+            self.audioGraphLock.lock()
+            let wasPlaying = self.node.isPlaying
+            if wasPlaying {
+              self.node.pause()
+            }
+            self.audioGraphLock.unlock()
+            if wasPlaying {
+              self.statsStarves += 1
+              self.clockLock.lock()
+              self._isNodePlaying = false
+              self.clockLock.unlock()
+            }
+          }
+        }
+      }
+    }
+  }
+
   private func logStatsIfDue() {
-    #if DEBUG
     let now = Date().timeIntervalSince1970
     guard now - statsLoggedAt >= 2.0 else { return }
     statsLoggedAt = now
+    let outLatency = AVAudioSession.sharedInstance().outputLatency
+    clockLock.lock()
+    _cachedOutputLatency = max(0, min(outLatency, 0.5))
+    clockLock.unlock()
+    #if DEBUG
     let rate = engine.outputNode.outputFormat(forBus: 0).sampleRate
-    print("[ExpoLiveStream] audio: queued=\(scheduled) enqueued=\(statsEnqueued) starves=\(statsStarves) resets=\(statsResets) hwRate=\(Int(rate)) srcRate=\(Int(currentFormat?.sampleRate ?? 0))")
+    print("[ExpoLiveStream] audio: inFlight=\(inFlight) pending=\(pending.count) enqueued=\(statsEnqueued) starves=\(statsStarves) drops=\(statsDrops) hwRate=\(Int(rate)) srcRate=\(Int(currentFormat?.sampleRate ?? 0)) outLatMs=\(Int(outLatency * 1000))")
     #endif
   }
 
-  /// Rebuilds the graph for a new input format. The node goes through the main
-  /// mixer rather than straight to the output node, because the mixer is what
-  /// resamples the stream's rate to whatever the hardware happens to run at.
   private func rewire(to format: AVAudioFormat) -> Bool {
-    reset()
+    audioGraphLock.lock()
+    resetLocked()
     if engine.isRunning { engine.stop() }
+    let session = AVAudioSession.sharedInstance()
+    try? session.setActive(true)
+    let outLatency = session.outputLatency
     engine.disconnectNodeOutput(node)
     engine.connect(node, to: engine.mainMixerNode, format: format)
+    let startError: Error?
     do {
       try engine.start()
+      startError = nil
     } catch {
-      // One line per failure, not one per buffer.
+      startError = error
+    }
+    audioGraphLock.unlock()
+
+    clockLock.lock()
+    _cachedOutputLatency = max(0, min(outLatency, 0.5))
+    clockLock.unlock()
+
+    if let error = startError {
       if !didReportFailure {
         didReportFailure = true
         print("[ExpoLiveStream] Audio engine start failed: \(error)")
@@ -163,23 +303,213 @@ private final class AudioRenderer: @unchecked Sendable {
   }
 }
 
-/// Receives decoded frames so the view can tell a live stream from a stalled
-/// one, and forwards the audio to `AudioRenderer`. It is a separate object
-/// because `HKStreamOutput` is `Sendable` and its callbacks are `nonisolated`,
-/// while the view is main-actor bound.
+private final class DisplayLinkProxy: NSObject {
+  weak var pacer: VideoSyncPacer?
+  init(_ pacer: VideoSyncPacer) { self.pacer = pacer }
+  @objc func onTick(_ link: CADisplayLink) {
+    pacer?.tick()
+  }
+}
+
+/// Hosts an `AVSampleBufferDisplayLayer`, which presents decoded frames on the
+/// compositor at the exact vsync their PTS falls on (no main-thread drawing).
+private final class SampleBufferView: UIView {
+  override class var layerClass: AnyClass { AVSampleBufferDisplayLayer.self }
+  var displayLayer: AVSampleBufferDisplayLayer { layer as! AVSampleBufferDisplayLayer }
+}
+
+/// Drives video presentation with a `CMTimebase` on the display layer and keeps
+/// that timebase locked to `AudioRenderer.currentPlaybackPTS()`.
 ///
-/// The video callback only stamps a time behind a lock. Hopping to the main
-/// actor per frame - which is what a `Task { @MainActor ... }` in here would do
-/// - floods the main queue at frame rate and stalls the whole UI; the watchdog
-/// timer reads this stamp on its own schedule instead.
+/// Frames are enqueued as soon as they are decoded; the layer itself shows each
+/// one when the timebase reaches its PTS and drops only frames that are really
+/// late. Lip-sync is held by nudging the timebase rate by a few percent (never
+/// visible) and hard-resyncing only on large jumps, so the jittery audio clock
+/// never turns into skipped or repeated frames. Video-only streams run the
+/// timebase on the host clock.
+private final class VideoSyncPacer: @unchecked Sendable {
+  /// Drift beyond which the timebase jumps straight to the audio clock.
+  private static let hardResyncSec: Double = 0.250
+  /// Drift tolerated without any rate correction.
+  private static let deadbandSec: Double = 0.015
+  /// Rate correction per second of drift, capped by `maxRateDelta`.
+  private static let rateGain: Double = 0.5
+  private static let maxRateDelta: Double = 0.05
+  /// Video-only: how far the timebase may run past the newest frame before it
+  /// is pulled back (network stall).
+  private static let starveResyncSec: Double = 0.300
+
+  private let lock = NSLock()
+  private let enqueueQueue = DispatchQueue(label: "expo.livestream.player.video")
+  private var displayLayer: AVSampleBufferDisplayLayer?
+  private var timebase: CMTimebase?
+  private var hasStarted = false
+  private var didResolveStreamOffset = false
+  private var streamPTSOffset: Double = 0
+  private var lastEnqueuedPTS: Double = 0
+  private var currentRate: Double = 0
+  private var generation: UInt64 = 0
+
+  private let audioRenderer: AudioRenderer
+  private weak var owner: PlayerView?
+  private var displayLink: CADisplayLink?
+
+  init(owner: PlayerView, audioRenderer: AudioRenderer) {
+    self.owner = owner
+    self.audioRenderer = audioRenderer
+  }
+
+  /// Binds the pacer to the view's display layer. Main thread only.
+  func attach(_ layer: AVSampleBufferDisplayLayer) {
+    var tb: CMTimebase?
+    CMTimebaseCreateWithSourceClock(
+      allocator: kCFAllocatorDefault,
+      sourceClock: CMClockGetHostTimeClock(),
+      timebaseOut: &tb
+    )
+    guard let tb else { return }
+    CMTimebaseSetRate(tb, rate: 0)
+    CMTimebaseSetTime(tb, time: .zero)
+    layer.controlTimebase = tb
+    lock.lock()
+    displayLayer = layer
+    timebase = tb
+    lock.unlock()
+  }
+
+  func start() {
+    stop()
+    let proxy = DisplayLinkProxy(self)
+    let link = CADisplayLink(target: proxy, selector: #selector(DisplayLinkProxy.onTick(_:)))
+    if #available(iOS 15.0, *) {
+      link.preferredFrameRateRange = CAFrameRateRange(minimum: 15, maximum: 30, preferred: 30)
+    }
+    link.add(to: .main, forMode: .common)
+    displayLink = link
+  }
+
+  func stop() {
+    displayLink?.invalidate()
+    displayLink = nil
+    resetBuffer()
+  }
+
+  /// Drops queued frames but keeps the last picture on screen.
+  func resetBuffer() {
+    lock.lock()
+    generation &+= 1
+    hasStarted = false
+    didResolveStreamOffset = false
+    streamPTSOffset = 0
+    lastEnqueuedPTS = 0
+    let layer = displayLayer
+    let tb = timebase
+    lock.unlock()
+    setRate(0)
+    if let tb { CMTimebaseSetTime(tb, time: .zero) }
+    enqueueQueue.async { layer?.flush() }
+  }
+
+  func enqueue(_ sampleBuffer: CMSampleBuffer) {
+    let pts = sampleBuffer.presentationTimeStamp.seconds
+    guard pts.isFinite else { return }
+    lock.lock()
+    let gen = generation
+    lock.unlock()
+
+    enqueueQueue.async { [weak self] in
+      guard let self else { return }
+      self.lock.lock()
+      guard gen == self.generation, let layer = self.displayLayer, let tb = self.timebase else {
+        self.lock.unlock()
+        return
+      }
+      let firstFrame = !self.hasStarted
+      if firstFrame {
+        self.hasStarted = true
+        CMTimebaseSetTime(tb, time: CMTime(seconds: pts, preferredTimescale: 90_000))
+      }
+      self.lastEnqueuedPTS = max(self.lastEnqueuedPTS, pts)
+      self.lock.unlock()
+
+      if firstFrame { self.setRate(1) }
+      if layer.status == .failed || layer.requiresFlushToResumeDecoding {
+        layer.flush()
+      }
+      layer.enqueue(sampleBuffer)
+    }
+  }
+
+  func tick() {
+    guard let view = owner else {
+      stop()
+      return
+    }
+    guard view.isRenderingActive else {
+      setRate(0)
+      return
+    }
+
+    let audioPTS = audioRenderer.currentPlaybackPTS()
+
+    lock.lock()
+    guard hasStarted, let tb = timebase else {
+      lock.unlock()
+      return
+    }
+    let tbNow = CMTimebaseGetTime(tb).seconds
+    var newRate = 1.0
+    var resyncTo: Double?
+
+    if let aPTS = audioPTS {
+      if !didResolveStreamOffset {
+        let initialDiff = lastEnqueuedPTS - aPTS
+        streamPTSOffset = abs(initialDiff) > 10.0 ? initialDiff : 0
+        didResolveStreamOffset = true
+      }
+      let target = aPTS + streamPTSOffset
+      let drift = tbNow - target
+      if abs(drift) > Self.hardResyncSec {
+        resyncTo = target
+      } else if abs(drift) > Self.deadbandSec {
+        let delta = max(-Self.maxRateDelta, min(Self.maxRateDelta, drift * Self.rateGain))
+        newRate = 1.0 - delta
+      }
+    } else if lastEnqueuedPTS > 0, tbNow - lastEnqueuedPTS > Self.starveResyncSec {
+      resyncTo = lastEnqueuedPTS - 0.05
+    }
+    lock.unlock()
+
+    if let resyncTo {
+      CMTimebaseSetTime(tb, time: CMTime(seconds: resyncTo, preferredTimescale: 90_000))
+    }
+    setRate(newRate)
+  }
+
+  private func setRate(_ rate: Double) {
+    lock.lock()
+    let tb = timebase
+    let changed = abs(currentRate - rate) > 0.001
+    if changed { currentRate = rate }
+    lock.unlock()
+    if changed, let tb { CMTimebaseSetRate(tb, rate: rate) }
+  }
+}
+
 private final class FrameObserver: HKStreamOutput, @unchecked Sendable {
   private let lock = NSLock()
   private var _lastVideoFrameAt: TimeInterval = 0
   private var _lastAudioBufferAt: TimeInterval = 0
+  /// HaishinKit detaches outputs asynchronously, so a torn-down stream can
+  /// still deliver buffers; they must not restart the audio engine or move the
+  /// video timebase of the stream that replaced it.
+  private var _isActive = true
   private let renderer: AudioRenderer
+  private let videoPacer: VideoSyncPacer
 
-  init(renderer: AudioRenderer) {
+  init(renderer: AudioRenderer, videoPacer: VideoSyncPacer) {
     self.renderer = renderer
+    self.videoPacer = videoPacer
   }
 
   var lastVideoFrameAt: TimeInterval {
@@ -194,29 +524,34 @@ private final class FrameObserver: HKStreamOutput, @unchecked Sendable {
     return _lastAudioBufferAt
   }
 
+  func deactivate() {
+    lock.lock()
+    _isActive = false
+    lock.unlock()
+  }
+
   func stream(_ stream: some HKStream, didOutput buffer: AVAudioBuffer, when: AVAudioTime) {
     let now = Date().timeIntervalSince1970
     lock.lock()
+    guard _isActive else { lock.unlock(); return }
     _lastAudioBufferAt = now
     lock.unlock()
-    renderer.enqueue(buffer)
+    renderer.enqueue(buffer, when: when)
   }
 
   func stream(_ stream: some HKStream, didOutput video: CMSampleBuffer) {
     let now = Date().timeIntervalSince1970
     lock.lock()
+    guard _isActive else { lock.unlock(); return }
     _lastVideoFrameAt = now
     lock.unlock()
+    videoPacer.enqueue(video)
   }
 }
 
 @objc(PlayerView)
 public class PlayerView: PlayerBaseView {
 
-  /// Commands arrive on the native module, not on a view, so they target
-  /// "the" active view. Tracking every live view as a stack (most recently
-  /// attached last) sends them to the one actually on screen, and a view
-  /// going away hands the role back instead of dropping it.
   private static let instancesLock = NSLock()
   private static var liveInstances: [WeakPlayerBox] = []
 
@@ -239,8 +574,6 @@ public class PlayerView: PlayerBaseView {
     liveInstances.removeAll { $0.value == nil || $0.value === view }
   }
 
-  /// A mounted view is not necessarily playing, so "is anything else using the
-  /// audio session" has to look at playback state, not at registration.
   private static func isAnotherInstancePlaying(besides view: PlayerView) -> Bool {
     instancesLock.lock()
     defer { instancesLock.unlock() }
@@ -253,12 +586,25 @@ public class PlayerView: PlayerBaseView {
   private var connection: RTMPConnection?
   private var stream: RTMPStream?
   private let audioRenderer = AudioRenderer()
-  private var hkView: MTHKView?
+  private lazy var videoPacer = VideoSyncPacer(owner: self, audioRenderer: audioRenderer)
+  private var videoView: SampleBufferView?
   private var frameObserver: FrameObserver?
+
+  fileprivate var isRenderingActive: Bool {
+    isPlaying && !isPaused && stream != nil
+  }
   private var statusTask: Task<Void, Never>?
 
   @objc public var url: String = ""
   @objc public var streamName: String = ""
+  @objc public var resizeMode: String = "contain" {
+    didSet {
+      let gravity: AVLayerVideoGravity = resizeMode == "cover" ? .resizeAspectFill : .resizeAspect
+      DispatchQueue.main.async { [weak self] in
+        self?.videoView?.displayLayer.videoGravity = gravity
+      }
+    }
+  }
 
   #if canImport(ExpoModulesCore)
   let onPlayerStateChanged = EventDispatcher()
@@ -281,6 +627,10 @@ public class PlayerView: PlayerBaseView {
 
   private var reconnectAttempts = 0
   private let maxReconnectAttempts = 10
+  /// Delays grow from 3.5 s to 15 s, so ten attempts ride out about two
+  /// minutes of a bad network or a restarting encoder (matches Android).
+  private static let reconnectBaseDelay: TimeInterval = 3.5
+  private static let reconnectMaxDelay: TimeInterval = 15.0
   private var reconnectTimer: Timer?
 
   private var lastFrameTime: TimeInterval = 0
@@ -321,7 +671,7 @@ public class PlayerView: PlayerBaseView {
   }
 
   private func forceRemeasure() {
-    hkView?.frame = bounds
+    videoView?.frame = bounds
   }
 
   public override func didMoveToWindow() {
@@ -335,12 +685,13 @@ public class PlayerView: PlayerBaseView {
   }
 
   private func setupView() {
-    let view = MTHKView(frame: bounds)
+    let view = SampleBufferView(frame: bounds)
     view.backgroundColor = .black
-    view.videoGravity = .resizeAspectFill
+    view.displayLayer.videoGravity = resizeMode == "cover" ? .resizeAspectFill : .resizeAspect
     view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
     addSubview(view)
-    hkView = view
+    videoView = view
+    videoPacer.attach(view.displayLayer)
   }
 
   /// RTMP needs the connect URL and the stream name apart: the server accepts
@@ -390,8 +741,19 @@ public class PlayerView: PlayerBaseView {
     isPlaying = true
     isPaused = false
     didWarnAboutSilence = false
+    updateIdleTimer()
     startPlayback(target)
     startStallChecker()
+  }
+
+  /// A viewer watches without touching the screen, so auto-lock would cut the
+  /// stream after the idle timeout. Holds the screen on only while some player
+  /// in this process is actively playing.
+  private func updateIdleTimer() {
+    let keepAwake = (isPlaying && !isPaused) || PlayerView.isAnotherInstancePlaying(besides: self)
+    if UIApplication.shared.isIdleTimerDisabled != keepAwake {
+      UIApplication.shared.isIdleTimerDisabled = keepAwake
+    }
   }
 
   private func startPlayback(_ target: (url: String, name: String)) {
@@ -400,29 +762,29 @@ public class PlayerView: PlayerBaseView {
 
     let conn = RTMPConnection()
     let newStream = RTMPStream(connection: conn)
-    let observer = FrameObserver(renderer: audioRenderer)
+    let observer = FrameObserver(renderer: audioRenderer, videoPacer: videoPacer)
 
     connection = conn
     stream = newStream
     frameObserver = observer
 
+    videoPacer.start()
     observeStatus(of: newStream)
 
-    // No `attachAudioPlayer` on purpose - see `AudioRenderer`. The decoded
-    // audio reaches the output observer instead, which the stream dispatches
-    // as long as the server grants audio sample access (every RTMP server in
-    // practice does; HaishinKit also defaults to granted).
+    // Video frames and decoded audio both route through `observer`: audio goes
+    // to `AudioRenderer` and video goes to `VideoSyncPacer`, which presents on
+    // `videoView` with a timebase locked to the hardware audio clock.
     Task { [weak self] in
       do {
-        if let hkView = self?.hkView {
-          await newStream.addOutput(hkView)
-        }
         await newStream.addOutput(observer)
         _ = try await conn.connect(target.url)
         _ = try await newStream.play(target.name)
       } catch {
         await MainActor.run { [weak self] in
-          self?.handlePlaybackFailure(error.localizedDescription)
+          // A failure of an attempt that has since been replaced says nothing
+          // about the current stream.
+          guard let self, self.stream === newStream else { return }
+          self.handlePlaybackFailure(error.localizedDescription)
         }
       }
     }
@@ -467,7 +829,10 @@ public class PlayerView: PlayerBaseView {
       for await status in await stream.status {
         if Task.isCancelled { return }
         await MainActor.run { [weak self] in
-          self?.handleStatus(status)
+          // Closing a replaced or stopped stream reports Connect.Closed; it
+          // must not trigger a reconnect or a "failed" for the current one.
+          guard let self, self.stream === stream else { return }
+          self.handleStatus(status)
         }
       }
     }
@@ -475,9 +840,12 @@ public class PlayerView: PlayerBaseView {
 
   private func handleStatus(_ status: RTMPStatus) {
     switch status.code {
-    case "NetStream.Play.Start", "NetStream.Unpause.Notify":
-      lastFrameTime = Date().timeIntervalSince1970
-      reportPlaying()
+    case "NetStream.Play.Start":
+      // nginx-rtmp answers Play.Start even when nobody is publishing, so only
+      // a decoded frame (seen by the stall checker) counts as playing.
+      // Reporting it here reset the reconnect budget on every attempt, so a
+      // missing stream retried forever behind a "playing" state.
+      break
     case "NetStream.Play.Stop", "NetStream.Play.Complete":
       if isPlaying { startReconnectPoller() }
 
@@ -519,6 +887,7 @@ public class PlayerView: PlayerBaseView {
     guard isPlaying else { return }
     isPlaying = false
     isPaused = false
+    updateIdleTimer()
     stopStallChecker()
     stopReconnectPoller()
     teardownStream()
@@ -528,12 +897,14 @@ public class PlayerView: PlayerBaseView {
   }
 
   func pause() {
-    guard isPlaying, !isPaused, let stream else { return }
+    guard isPlaying, !isPaused, stream != nil else { return }
     isPaused = true
-    audioRenderer.stop()
-    Task {
-      _ = try? await stream.pause(true)
-    }
+    updateIdleTimer()
+    stopReconnectPoller()
+    // resume() reconnects at the live edge anyway, so a paused viewer does not
+    // need to hold the connection; keeping it open let buffers already in
+    // flight restart audio while paused.
+    teardownStream()
     lastReportedState = "paused"
     emitPlayerStateChanged(["state": "paused"])
   }
@@ -545,10 +916,14 @@ public class PlayerView: PlayerBaseView {
     }
 
     isPaused = false
+    updateIdleTimer()
     // Resuming a live stream from where it was paused would replay stale
     // frames or stall if the server dropped the paused subscriber, so reconnect
     // at the live edge (matching Android).
     guard let target = connectTarget() else { return }
+    // The stall clock is stale after a pause; restart it so the connecting
+    // watchdog measures this attempt, not the pause.
+    lastFrameTime = Date().timeIntervalSince1970
     lastReportedState = "connecting"
     emitPlayerStateChanged(["state": "connecting"])
     startPlayback(target)
@@ -557,7 +932,7 @@ public class PlayerView: PlayerBaseView {
   private func startStallChecker() {
     stopStallChecker()
     lastFrameTime = Date().timeIntervalSince1970
-    stallCheckTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+    stallCheckTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
       guard let self = self else { return }
       guard self.isPlaying, !self.isPaused else { return }
 
@@ -572,9 +947,19 @@ public class PlayerView: PlayerBaseView {
       if self.lastReportedState == "playing" && self.lastFrameTime > 0 {
         let elapsed = Date().timeIntervalSince1970 - self.lastFrameTime
         if elapsed > 8.0 {
-          self.lastFrameTime = 0
+          // Baseline at "now", not 0: the dead stream's observer still holds its
+          // last frame time, and comparing against 0 would read that stale frame
+          // as fresh, report "playing" and cancel the reconnect it just started.
+          self.lastFrameTime = Date().timeIntervalSince1970
           self.startReconnectPoller()
         }
+      } else if self.lastReportedState == "connecting", self.reconnectTimer == nil,
+                self.lastFrameTime > 0,
+                Date().timeIntervalSince1970 - self.lastFrameTime > 15.0 {
+        // Connected but never received a frame (no publisher yet): without
+        // this the view sat on "connecting" forever.
+        self.lastFrameTime = 0
+        self.startReconnectPoller()
       }
 
       // Pictures but never a single audio buffer means the server refused
@@ -601,24 +986,33 @@ public class PlayerView: PlayerBaseView {
     reconnectAttempts = 0
     lastReportedState = "buffering"
     emitPlayerStateChanged(["state": "buffering"])
+    scheduleReconnectAttempt()
+  }
 
-    reconnectTimer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: true) { [weak self] timer in
-      guard let self = self else { timer.invalidate(); return }
+  private func scheduleReconnectAttempt() {
+    let delay = min(
+      Self.reconnectBaseDelay * pow(1.5, Double(reconnectAttempts)),
+      Self.reconnectMaxDelay
+    )
+    reconnectTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+      guard let self = self, self.reconnectTimer != nil else { return }
 
       self.reconnectAttempts += 1
       if self.reconnectAttempts >= self.maxReconnectAttempts {
-        timer.invalidate()
         self.reconnectTimer = nil
         self.isPlaying = false
         self.reconnectAttempts = 0
+        self.updateIdleTimer()
         self.teardownStream()
         self.emitPlayerError(["msg": "Stream lost — reconnect failed"])
         self.emitPlayerStateChanged(["state": "failed"])
         return
       }
 
-      guard let target = self.connectTarget() else { return }
-      self.startPlayback(target)
+      if let target = self.connectTarget() {
+        self.startPlayback(target)
+      }
+      self.scheduleReconnectAttempt()
     }
   }
 
@@ -631,23 +1025,22 @@ public class PlayerView: PlayerBaseView {
   private func teardownStream() {
     statusTask?.cancel()
     statusTask = nil
+    videoPacer.stop()
     audioRenderer.stop()
 
     let oldStream = stream
     let oldConnection = connection
     let oldObserver = frameObserver
+    oldObserver?.deactivate()
     stream = nil
     connection = nil
     frameObserver = nil
 
     guard oldStream != nil || oldConnection != nil else { return }
 
-    Task { [weak hkView] in
+    Task {
       if let oldStream {
         if let oldObserver { await oldStream.removeOutput(oldObserver) }
-        if let hkView {
-          await oldStream.removeOutput(hkView)
-        }
         _ = try? await oldStream.close()
       }
       _ = try? await oldConnection?.close()
@@ -665,6 +1058,7 @@ public class PlayerView: PlayerBaseView {
     isPaused = false
     teardownStream()
     PlayerView.unregister(self)
+    updateIdleTimer()
     releaseAudioSession()
   }
 

@@ -43,6 +43,9 @@ public class ExpoLiveStreamPlayerModule: Module {
       Prop("streamName") { (view: PlayerView, name: String) in
         view.streamName = name
       }
+      Prop("resizeMode") { (view: PlayerView, mode: String) in
+        view.resizeMode = mode
+      }
     }
   }
 }
