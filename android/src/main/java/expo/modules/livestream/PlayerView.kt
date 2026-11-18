@@ -80,6 +80,7 @@ class PlayerView(context: Context) : LinearLayout(context) {
   private var surfaceReady = false
   private var videoWidth = 0
   private var videoHeight = 0
+  private var transformReady = false
   private var isSpeedAdjusted = false
   var url: String = ""
   var streamName: String = ""
@@ -174,6 +175,8 @@ class PlayerView(context: Context) : LinearLayout(context) {
         // the player can sit in STATE_READY while the server has gone quiet.
         override fun onSurfaceTextureUpdated(st: SurfaceTexture) {
           lastFrameTime = System.currentTimeMillis()
+          // Reveal only on a frame drawn after the aspect transform is set.
+          if (transformReady && textureView?.alpha != 1f) textureView?.alpha = 1f
         }
       }
     }
@@ -229,7 +232,7 @@ class PlayerView(context: Context) : LinearLayout(context) {
     val matrix = Matrix()
     matrix.setScale(scaleX, scaleY, viewWidth / 2f, viewHeight / 2f)
     tv.setTransform(matrix)
-    if (tv.alpha != 1f) tv.alpha = 1f
+    transformReady = true
   }
 
   private fun buildConnectUrl(): String {
